@@ -4,12 +4,37 @@ import os
 import cv2
 import numpy as np
 import threading
+import time
+from collections import deque
 
 # ========== 全局视频状态 ==========
 in_video = False
 cap = None
 video_stop_event = threading.Event()
-video_lock = threading.Lock()  # 线程锁，保护全局状态
+render_stop_event = threading.Event()
+video_lock = threading.Lock()
+frame_queue = deque(maxlen=1)  # 队列最多保存最新1帧，旧帧自动丢弃
+global_writer = None
+global_loop = None
+window_name = "VideoCall"  # 使用英文，解决标题乱码
+
+
+def render_thread():
+    """独立渲染线程，所有cv2.imshow必须放在这个线程，解决UI错乱"""
+    # 只创建一次窗口
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    while not render_stop_event.is_set():
+        if len(frame_queue) > 0:
+            frame = frame_queue.pop()
+            cv2.imshow(window_name, frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                print("\n⌨️ 按q挂断视频")
+                if global_loop and global_writer:
+                    asyncio.run_coroutine_threadsafe(stop_video(global_writer), global_loop)
+        else:
+            cv2.waitKey(1)
+    cv2.destroyWindow(window_name)
 
 
 async def receive_loop(reader, writer):
@@ -55,26 +80,23 @@ async def receive_loop(reader, writer):
                 print(f"\n📹 {inviter} 发起视频通话邀请，输入 y 接受 / n 拒绝：")
                 print("> ", end="", flush=True)
                 continue
-
             if line.startswith("CALL_ACCEPT:"):
                 _, user = line.split(":", 1)
                 print(f"\n✅ {user} 加入了视频通话")
                 print("> ", end="", flush=True)
                 continue
-
             if line.startswith("CALL_REJECT:"):
                 _, user = line.split(":", 1)
                 print(f"\n❌ {user} 拒绝了视频邀请")
                 print("> ", end="", flush=True)
                 continue
-
             if line.startswith("CALL_HANGUP:"):
                 _, user = line.split(":", 1)
                 print(f"\n👋 {user} 挂断了视频通话")
                 print("> ", end="", flush=True)
                 continue
 
-            # 接收并显示视频帧
+            # 接收视频帧：只放入队列，不在这个线程渲染！删掉帧内print提示符
             if line.startswith("VIDEO_FRAME:"):
                 with video_lock:
                     if not in_video:
@@ -83,26 +105,17 @@ async def receive_loop(reader, writer):
                         frame_size = int(frame_size_str)
                         await reader.readexactly(frame_size)
                         continue
-
                 _, frame_size_str = line.split(":", 1)
                 frame_size = int(frame_size_str)
-
                 # 精准读取完整帧
                 try:
                     frame_data = await reader.readexactly(frame_size)
                 except asyncio.IncompleteReadError:
                     continue
-
-                # 解码显示
+                # 解码，送入队列
                 frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
                 if frame is not None:
-                    cv2.imshow("视频通话", frame)
-                    # 修复：按q真正触发挂断
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
-                        print("\n⌨️ 按q挂断视频")
-                        asyncio.get_running_loop().create_task(stop_video(writer))
-                print("> ", end="", flush=True)
+                    frame_queue.append(frame)
                 continue
 
             # 普通文本消息
@@ -118,39 +131,14 @@ async def receive_loop(reader, writer):
         with video_lock:
             if in_video:
                 video_stop_event.set()
+                render_stop_event.set()
                 in_video = False
-        cv2.destroyAllWindows()
-
-
-async def send_file(writer, file_path):
-    """发送本地文件给所有人"""
-    if not os.path.exists(file_path):
-        print(f"❌ 文件不存在: {file_path}")
-        return
-    file_size = os.path.getsize(file_path)
-    filename = os.path.basename(file_path)
-    header = f"FILE:{filename}:{file_size}\n".encode()
-    writer.write(header)
-    await writer.drain()
-    sent = 0
-    with open(file_path, 'rb') as f:
-        while True:
-            chunk = f.read(4096)
-            if not chunk:
-                break
-            writer.write(chunk)
-            sent += len(chunk)
-            progress = sent / file_size * 100
-            print(f"\r📤 发送进度: {progress:.1f}%", end="", flush=True)
-    await writer.drain()
-    print(f"\n✅ 文件 {filename} 发送完成!")
 
 
 def video_capture_thread(writer, loop):
-    """后台线程：采集摄像头帧并发送"""
+    """后台线程：采集摄像头帧并发送，本线程绝不调用imshow"""
     global cap, in_video, video_stop_event
-
-    # 修复：Windows下强制指定CAP_DSHOW驱动，解决摄像头打不开/索引越界
+    # 换回 DSHOW，规避MSMF的-1072875772报错
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("\n❌ 无法打开摄像头")
@@ -168,9 +156,17 @@ def video_capture_thread(writer, loop):
                     break
 
             ret, frame = cap.read()
+            # ==========新增重试逻辑============
+            retry = 0
+            while not ret and retry < 3:
+                retry +=1
+                ret, frame = cap.read()
+                time.sleep(0.01)
             if not ret:
-                print("\n❌ 摄像头读取失败")
-                break
+                print("\n⚠️ 摄像头读取失败，尝试继续重试...")
+                time.sleep(0.15)
+                continue
+            # ==================================
 
             # 缩小分辨率+压缩，降低带宽
             frame = cv2.resize(frame, (480, 320))
@@ -184,22 +180,20 @@ def video_capture_thread(writer, loop):
                     writer.write(header + frame_bytes)
                     await writer.drain()
                 except Exception:
-                    # 修复：连接断开自动停止，避免反复报WinError 64
                     video_stop_event.set()
+                    render_stop_event.set()
                     with video_lock:
                         in_video = False
 
             asyncio.run_coroutine_threadsafe(send_frame(), loop)
-
-            # 控制帧率 ~15fps
-            video_stop_event.wait(0.06)
+            # 固定延时锁定≈15fps
+            time.sleep(0.06)
 
     except Exception as e:
         print(f"\n视频采集异常: {e}")
     finally:
         if cap is not None:
             cap.release()
-        cv2.destroyAllWindows()
         with video_lock:
             in_video = False
         print("\n📹 视频通话已结束")
@@ -208,33 +202,36 @@ def video_capture_thread(writer, loop):
 
 async def start_video(writer, loop):
     """启动视频通话"""
-    global in_video, video_stop_event
+    global in_video, video_stop_event, render_stop_event, global_writer, global_loop
+    global_writer = writer
+    global_loop = loop
     with video_lock:
         if in_video:
             print("⚠️ 已经在视频通话中")
             return
         in_video = True
         video_stop_event.clear()
-
+        render_stop_event.clear()
+    # 采集线程
     threading.Thread(target=video_capture_thread, args=(writer, loop), daemon=True).start()
+    # 独立渲染线程
+    threading.Thread(target=render_thread, daemon=True).start()
 
 
 async def stop_video(writer):
     """挂断视频"""
-    global in_video, video_stop_event
+    global in_video, video_stop_event, render_stop_event
     with video_lock:
         if not in_video:
             return
         in_video = False
         video_stop_event.set()
-
+        render_stop_event.set()
     try:
         writer.write(b"CALL_HANGUP:me\n")
         await writer.drain()
     except Exception:
         pass
-
-    cv2.destroyAllWindows()
 
 
 async def tcp_client(server_ip, port):
@@ -280,17 +277,14 @@ async def tcp_client(server_ip, port):
                 await writer.drain()
                 await start_video(writer, loop)
                 continue
-
             if msg == '/hangup':
                 await stop_video(writer)
                 continue
-
             if msg.lower() == 'y' and not in_video:
                 writer.write(b"CALL_ACCEPT:me\n")
                 await writer.drain()
                 await start_video(writer, loop)
                 continue
-
             if msg.lower() == 'n':
                 writer.write(b"CALL_REJECT:me\n")
                 await writer.drain()
@@ -314,6 +308,30 @@ async def tcp_client(server_ip, port):
         print("❌ 连接失败: 服务端未启动或地址/端口错误")
     except Exception as e:
         print(f"❌ 客户端异常: {e}")
+
+
+async def send_file(writer, file_path):
+    """发送本地文件给所有人"""
+    if not os.path.exists(file_path):
+        print(f"❌ 文件不存在: {file_path}")
+        return
+    file_size = os.path.getsize(file_path)
+    filename = os.path.basename(file_path)
+    header = f"FILE:{filename}:{file_size}\n".encode()
+    writer.write(header)
+    await writer.drain()
+    sent = 0
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(4096)
+            if not chunk:
+                break
+            writer.write(chunk)
+            sent += len(chunk)
+            progress = sent / file_size * 100
+            print(f"\r📤 发送进度: {progress:.1f}%", end="", flush=True)
+    await writer.drain()
+    print(f"\n✅ 文件 {filename} 发送完成!")
 
 
 if __name__ == "__main__":

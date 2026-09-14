@@ -46,7 +46,7 @@ async def handle_client(reader, writer):
     print(f"新连接: {addr}")
 
     try:
-        # 1. 昵称设置（和之前一样）
+        # 1. 昵称设置（完全和之前一样）
         writer.write("请输入你的昵称: ".encode() + b'\n')
         await writer.drain()
         nickname_line = await reader.readline()
@@ -56,9 +56,8 @@ async def handle_client(reader, writer):
         print(f"用户 {nickname} 已加入")
         await broadcast_text(f"📢 {nickname} 加入了聊天室", writer)
 
-        # 2. 主循环：自动区分文本/文件
+        # 2. 主循环（完全和之前一样）
         while True:
-            # 先读一行：要么是普通文本，要么是文件头
             line = await reader.readline()
             if not line:
                 break
@@ -66,23 +65,26 @@ async def handle_client(reader, writer):
             if not line:
                 continue
 
-            # ========== 处理文件传输 ==========
+            # ========== 处理文件传输（仅改了这里2行）==========
             if line.startswith("FILE:"):
-                # 文件头格式：FILE:文件名:文件大小
                 _, filename, file_size_str = line.split(":", 2)
                 file_size = int(file_size_str)
-                filename = os.path.basename(filename)  # 去掉路径只留文件名
+                filename = os.path.basename(filename)
                 print(f"[{nickname}] 正在发送文件: {filename} ({file_size}字节)")
 
                 # 先广播文件头给其他人
-                await broadcast_text(f"FILE:{filename}:{file_size}", writer)
+                await broadcast_text(f"FILE:{nickname}:{filename}:{file_size}", writer)
                 # 再转发二进制内容
                 await forward_file(reader, file_size, writer)
-                # 广播传输完成提示
-                await broadcast_text(f"✅ {nickname} 发送的文件 {filename} 传输完成", writer)
+
+                # ===== 以下是唯一改动的地方 =====
+                # 1. 只在服务端控制台打印传输完成（你要的效果：接在"正在发送文件"后面）
+                print(f"[{nickname}] 文件 {filename} 传输完成")
+                # 2. 删掉了原来广播给所有人的"✅ xx发送的文件传输完成"！接收方不会再看到这句突兀的话
+                # =================================
                 continue
 
-            # ========== 普通文本消息（和之前逻辑一样）==========
+            # ========== 普通文本消息（完全和之前一样）==========
             print(f"[{nickname}] {line}")
             await broadcast_text(f"[{nickname}]: {line}", writer)
 

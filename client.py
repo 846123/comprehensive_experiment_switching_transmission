@@ -16,7 +16,7 @@ async def receive_loop(reader):
 
             # ========== 处理接收文件 ==========
             if line.startswith("FILE:"):
-                _, filename, file_size_str = line.split(":", 2)
+                _, sender, filename, file_size_str = line.split(":", 3)
                 file_size = int(file_size_str)
                 save_name = f"received_{filename}"
                 print(f"\n📥 正在接收文件: {filename} (大小: {file_size / 1024:.1f}KB)")

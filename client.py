@@ -13,27 +13,40 @@ cap = None
 video_stop_event = threading.Event()
 render_stop_event = threading.Event()
 video_lock = threading.Lock()
-frame_queue = deque(maxlen=1)  # 队列最多保存最新1帧，旧帧自动丢弃
+
+frame_queue_remote = deque(maxlen=1)   # 远端画面（对方）
+frame_queue_local = deque(maxlen=1)    # 本地摄像头预览（自己）
+
 global_writer = None
 global_loop = None
-window_name = "VideoCall"  # 使用英文，解决标题乱码
+window_name = "VideoCall"
 
 
 def render_thread():
-    """独立渲染线程，所有cv2.imshow必须放在这个线程，解决UI错乱"""
-    # 只创建一次窗口
+    """渲染线程：拼接本地+远端画面，左右分屏（修复闪烁，缓存上一帧）"""
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    blank = np.zeros((320, 480, 3), dtype=np.uint8)
+    # 缓存上一帧画面，无新帧持续显示旧画面，避免黑屏闪烁
+    last_remote = blank
+    last_local = blank
+
     while not render_stop_event.is_set():
-        if len(frame_queue) > 0:
-            frame = frame_queue.pop()
-            cv2.imshow(window_name, frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("\n⌨️ 按q挂断视频")
-                if global_loop and global_writer:
-                    asyncio.run_coroutine_threadsafe(stop_video(global_writer), global_loop)
-        else:
-            cv2.waitKey(1)
+        # 有新帧才更新缓存，只读不删除
+        if len(frame_queue_remote) > 0:
+            last_remote = frame_queue_remote[-1]
+        if len(frame_queue_local) > 0:
+            last_local = frame_queue_local[-1]
+
+        remote_frame = cv2.resize(last_remote, (480, 320))
+        local_frame = cv2.resize(last_local, (480, 320))
+        combined = np.hstack([local_frame, remote_frame])  # 左：自己，右：对方
+
+        cv2.imshow(window_name, combined)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            print("\n⌨️ 按q挂断视频")
+            if global_loop and global_writer:
+                asyncio.run_coroutine_threadsafe(stop_video(global_writer), global_loop)
     cv2.destroyWindow(window_name)
 
 
@@ -45,11 +58,11 @@ async def receive_loop(reader, writer):
             if not line:
                 print("\n服务端已断开连接")
                 break
-
-            # 修复：增加解码异常捕获，解决utf-8解码0xff报错
             try:
                 line = line.decode().rstrip('\n')
             except UnicodeDecodeError:
+                continue
+            if not line:
                 continue
 
             # 文件接收
@@ -74,7 +87,7 @@ async def receive_loop(reader, writer):
                 print("> ", end="", flush=True)
                 continue
 
-            # 视频邀请/控制消息
+            # 视频控制消息
             if line.startswith("CALL_INVITE:"):
                 _, inviter = line.split(":", 1)
                 print(f"\n📹 {inviter} 发起视频通话邀请，输入 y 接受 / n 拒绝：")
@@ -96,38 +109,33 @@ async def receive_loop(reader, writer):
                 print("> ", end="", flush=True)
                 continue
 
-            # 接收视频帧：只放入队列，不在这个线程渲染！删掉帧内print提示符
+            # 接收远端视频帧，放入远端队列
             if line.startswith("VIDEO_FRAME:"):
                 with video_lock:
                     if not in_video:
-                        # 不在视频中则丢弃对应字节，避免污染后续消息
                         _, frame_size_str = line.split(":", 1)
                         frame_size = int(frame_size_str)
                         await reader.readexactly(frame_size)
                         continue
                 _, frame_size_str = line.split(":", 1)
                 frame_size = int(frame_size_str)
-                # 精准读取完整帧
                 try:
                     frame_data = await reader.readexactly(frame_size)
                 except asyncio.IncompleteReadError:
                     continue
-                # 解码，送入队列
                 frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
                 if frame is not None:
-                    frame_queue.append(frame)
+                    frame_queue_remote.append(frame)
                 continue
 
             # 普通文本消息
             print(f"\n{line}")
             print("> ", end="", flush=True)
-
     except asyncio.CancelledError:
         pass
     except Exception as e:
         print(f"\n接收出错: {e}")
     finally:
-        # 接收结束，确保视频资源释放
         with video_lock:
             if in_video:
                 video_stop_event.set()
@@ -136,9 +144,8 @@ async def receive_loop(reader, writer):
 
 
 def video_capture_thread(writer, loop):
-    """后台线程：采集摄像头帧并发送，本线程绝不调用imshow"""
+    """采集：发送到服务端 + 送入本地预览队列，增加自拍镜像"""
     global cap, in_video, video_stop_event
-    # 换回 DSHOW，规避MSMF的-1072875772报错
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("\n❌ 无法打开摄像头")
@@ -154,25 +161,26 @@ def video_capture_thread(writer, loop):
             with video_lock:
                 if not in_video:
                     break
-
             ret, frame = cap.read()
-            # ==========新增重试逻辑============
             retry = 0
             while not ret and retry < 3:
-                retry +=1
+                retry += 1
                 ret, frame = cap.read()
                 time.sleep(0.01)
             if not ret:
-                print("\n⚠️ 摄像头读取失败，尝试继续重试...")
+                print("\n⚠️ 摄像头读取失败，尝试重试...")
                 time.sleep(0.15)
                 continue
-            # ==================================
 
-            # 缩小分辨率+压缩，降低带宽
-            frame = cv2.resize(frame, (480, 320))
-            _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            # 水平翻转，自拍镜像效果
+            frame = cv2.flip(frame, 1)
+            # 保存原图到本地预览队列
+            frame_queue_local.append(frame.copy())
+
+            # 压缩编码发送给对方
+            frame_send = cv2.resize(frame, (480, 320))
+            _, jpeg = cv2.imencode('.jpg', frame_send, [cv2.IMWRITE_JPEG_QUALITY, 60])
             frame_bytes = jpeg.tobytes()
-
             header = f"VIDEO_FRAME:{len(frame_bytes)}\n".encode()
 
             async def send_frame():
@@ -184,9 +192,7 @@ def video_capture_thread(writer, loop):
                     render_stop_event.set()
                     with video_lock:
                         in_video = False
-
             asyncio.run_coroutine_threadsafe(send_frame(), loop)
-            # 固定延时锁定≈15fps
             time.sleep(0.06)
 
     except Exception as e:
@@ -201,7 +207,6 @@ def video_capture_thread(writer, loop):
 
 
 async def start_video(writer, loop):
-    """启动视频通话"""
     global in_video, video_stop_event, render_stop_event, global_writer, global_loop
     global_writer = writer
     global_loop = loop
@@ -212,14 +217,11 @@ async def start_video(writer, loop):
         in_video = True
         video_stop_event.clear()
         render_stop_event.clear()
-    # 采集线程
     threading.Thread(target=video_capture_thread, args=(writer, loop), daemon=True).start()
-    # 独立渲染线程
     threading.Thread(target=render_thread, daemon=True).start()
 
 
 async def stop_video(writer):
-    """挂断视频"""
     global in_video, video_stop_event, render_stop_event
     with video_lock:
         if not in_video:
@@ -239,8 +241,6 @@ async def tcp_client(server_ip, port):
     try:
         reader, writer = await asyncio.open_connection(server_ip, port)
         print(f"已连接到 {server_ip}:{port}")
-
-        # 输入昵称
         prompt = await reader.readline()
         print(prompt.decode(), end="", flush=True)
         nickname = await asyncio.get_running_loop().run_in_executor(None, input)
@@ -257,21 +257,16 @@ async def tcp_client(server_ip, port):
         recv_task = asyncio.create_task(receive_loop(reader, writer))
         loop = asyncio.get_running_loop()
 
-        # 主发送循环
         while True:
             msg = await loop.run_in_executor(None, input, "> ")
             if msg.lower() == 'quit':
                 break
-
-            # 发文件命令
             if msg.startswith("/send "):
                 file_path = msg[6:].strip()
                 if file_path.startswith(('"', "'")) and file_path.endswith(('"', "'")):
                     file_path = file_path[1:-1]
                 await send_file(writer, file_path)
                 continue
-
-            # 视频命令
             if msg == '/call':
                 writer.write(b"CALL_INVITE:me\n")
                 await writer.drain()
@@ -290,20 +285,16 @@ async def tcp_client(server_ip, port):
                 await writer.drain()
                 print("✅ 已拒绝邀请")
                 continue
-
-            # 普通文本消息
             if msg.strip():
                 writer.write((msg + '\n').encode())
                 await writer.drain()
 
-        # 退出清理
         if in_video:
             await stop_video(writer)
         print("正在断开...")
         writer.close()
         await writer.wait_closed()
         recv_task.cancel()
-
     except ConnectionRefusedError:
         print("❌ 连接失败: 服务端未启动或地址/端口错误")
     except Exception as e:
@@ -311,7 +302,6 @@ async def tcp_client(server_ip, port):
 
 
 async def send_file(writer, file_path):
-    """发送本地文件给所有人"""
     if not os.path.exists(file_path):
         print(f"❌ 文件不存在: {file_path}")
         return
@@ -339,8 +329,6 @@ if __name__ == "__main__":
         print("用法: python client.py <服务器IP> <端口>")
         print("示例: python client.py 127.0.0.1 8080")
         sys.exit(1)
-
     server_ip = sys.argv[1]
     port = int(sys.argv[2])
-
     asyncio.run(tcp_client(server_ip, port))

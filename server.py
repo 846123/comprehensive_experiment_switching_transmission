@@ -1,44 +1,90 @@
 import asyncio
+import os
 
 clients = {}
 
-def broadcast(msg, exclude_writer=None):
-    """广播消息给所有客户端"""
+
+async def broadcast_text(text, exclude_writer=None):
+    """广播文本消息（自动加换行符）"""
+    data = (text + '\n').encode()
     for writer in clients:
         if writer is not exclude_writer:
             try:
-                writer.write(msg.encode())
-                asyncio.create_task(writer.drain())
+                writer.write(data)
+                await writer.drain()
             except Exception:
                 pass
+
+
+async def forward_file(reader, file_size, exclude_writer=None):
+    """转发文件二进制块给所有其他客户端"""
+    remaining = file_size
+    while remaining > 0:
+        chunk_size = min(4096, remaining)
+        chunk = await reader.read(chunk_size)
+        if not chunk:
+            break
+        # 转发给所有其他客户端
+        for writer in clients:
+            if writer is not exclude_writer:
+                try:
+                    writer.write(chunk)
+                except Exception:
+                    pass
+        remaining -= len(chunk)
+    # 等所有发送完成
+    for writer in clients:
+        if writer is not exclude_writer:
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+
 
 async def handle_client(reader, writer):
     addr = writer.get_extra_info('peername')
     print(f"新连接: {addr}")
 
     try:
-        # 1. 请求昵称
-        writer.write("请输入你的昵称: ".encode())
+        # 1. 昵称设置（和之前一样）
+        writer.write("请输入你的昵称: ".encode() + b'\n')
         await writer.drain()
-        data = await reader.read(1024)
-        nickname = data.decode().strip()
-        if not nickname:
-            nickname = f"用户{addr}"
+        nickname_line = await reader.readline()
+        nickname = nickname_line.decode().strip() or f"用户{addr}"
 
         clients[writer] = nickname
         print(f"用户 {nickname} 已加入")
-        broadcast(f"\n📢 {nickname} 加入了聊天室\n", writer)
+        await broadcast_text(f"📢 {nickname} 加入了聊天室", writer)
 
-        # 2. 接收消息循环
+        # 2. 主循环：自动区分文本/文件
         while True:
-            data = await reader.read(1024)
-            if not data:
+            # 先读一行：要么是普通文本，要么是文件头
+            line = await reader.readline()
+            if not line:
                 break
-            message = data.decode().strip()
-            if not message:
+            line = line.decode().strip()
+            if not line:
                 continue
-            print(f"[{nickname}] {message}")
-            broadcast(f"[{nickname}]: {message}\n", writer)
+
+            # ========== 处理文件传输 ==========
+            if line.startswith("FILE:"):
+                # 文件头格式：FILE:文件名:文件大小
+                _, filename, file_size_str = line.split(":", 2)
+                file_size = int(file_size_str)
+                filename = os.path.basename(filename)  # 去掉路径只留文件名
+                print(f"[{nickname}] 正在发送文件: {filename} ({file_size}字节)")
+
+                # 先广播文件头给其他人
+                await broadcast_text(f"FILE:{filename}:{file_size}", writer)
+                # 再转发二进制内容
+                await forward_file(reader, file_size, writer)
+                # 广播传输完成提示
+                await broadcast_text(f"✅ {nickname} 发送的文件 {filename} 传输完成", writer)
+                continue
+
+            # ========== 普通文本消息（和之前逻辑一样）==========
+            print(f"[{nickname}] {line}")
+            await broadcast_text(f"[{nickname}]: {line}", writer)
 
     except Exception as e:
         print(f"客户端异常: {e}")
@@ -46,7 +92,7 @@ async def handle_client(reader, writer):
         if writer in clients:
             nickname = clients[writer]
             del clients[writer]
-            broadcast(f"\n📢 {nickname} 离开了聊天室\n")
+            await broadcast_text(f"📢 {nickname} 离开了聊天室")
             print(f"{nickname} 已断开")
         writer.close()
         try:
@@ -54,15 +100,18 @@ async def handle_client(reader, writer):
         except Exception:
             pass
 
+
 async def main():
     server = await asyncio.start_server(handle_client, '0.0.0.0', 8080)
-    print("=" * 40)
-    print("聊天室服务端已启动!")
+    print("=" * 50)
+    print("📁 带文件传输的聊天室服务端已启动!")
     print("监听地址: 0.0.0.0:8080")
+    print("发文件命令: /send <本地文件路径>")
     print("按 Ctrl+C 停止服务")
-    print("=" * 40)
+    print("=" * 50)
     async with server:
         await server.serve_forever()
+
 
 if __name__ == "__main__":
     try:

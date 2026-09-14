@@ -1,0 +1,46 @@
+# PyCharm IDE 文件
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+build/
+idea/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+.env
+.venv
+venv/
+env/
+
+# Conda 环境（不要把整个环境提交）
+envs/
+conda-meta/
+
+# 日志、输出文件
+*.log
+*.out
+*.csv
+*.txt
+*.png
+*.jpg
+*.svg
+*.npy
+*.npz
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# 打包临时文件
+dist/
+*.egg-info/
+*.egg

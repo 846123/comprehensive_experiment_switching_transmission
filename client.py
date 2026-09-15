@@ -8,30 +8,46 @@ import time
 from collections import deque
 import sounddevice as sd
 
-# ========== 全局视频&音频状态 ==========
+# ===================== 全局音视频状态变量 =====================
+# 是否处于音视频通话状态
 in_video = False
+# 摄像头捕获对象
 cap = None
+# 视频采集线程停止事件
 video_stop_event = threading.Event()
+# 画面渲染线程停止事件
 render_stop_event = threading.Event()
+# 音频播放线程停止事件
 audio_stop_event = threading.Event()
+# 多线程互斥锁，保护音视频全局状态，防止多线程竞争访问
 video_lock = threading.Lock()
 
-frame_queue_remote = deque(maxlen=1)   # 远端画面（对方）
-frame_queue_local = deque(maxlen=1)    # 本地摄像头预览（自己）
-audio_queue_remote = deque(maxlen=8)   # 远端音频缓冲区，扩大上限防断音
+# 远端对方画面帧队列，最大长度1，自动丢弃旧帧，降低画面延迟
+frame_queue_remote = deque(maxlen=1)
+# 本地摄像头预览画面帧队列，最大长度1
+frame_queue_local = deque(maxlen=1)
+# 远端音频数据缓冲区，缓存对方音频片段，上限8防止音频堆积
+audio_queue_remote = deque(maxlen=8)
 
+# 网络连接对象，供子线程调用
 global_writer = None
+# asyncio事件循环对象，供子线程提交协程任务
 global_loop = None
+# 视频窗口名称
 window_name = "VideoCall"
 
-# 音频参数，固定配置
-CHUNK = 1024
-CHANNELS = 1
-RATE = 16000
+# 音频固定配置参数
+CHUNK = 1024        # 单次音频采样块大小
+CHANNELS = 1        # 单声道
+RATE = 16000        # 音频采样率 16000Hz
 
 
 def render_thread():
-    """渲染线程：拼接本地+远端画面，左右分屏"""
+    """
+    画面渲染独立线程
+    读取本地预览队列与远端画面队列，左右拼接分屏，创建窗口展示画面
+    按下q键触发挂断音视频通话
+    """
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     blank = np.zeros((320, 480, 3), dtype=np.uint8)
     last_remote = blank
@@ -53,9 +69,13 @@ def render_thread():
     cv2.destroyWindow(window_name)
 
 
-# ========== 音频播放线程（播放收到的对方声音 sounddevice ==========
 def audio_play_thread():
+    """
+    音频播放线程，负责播放远端传来的对方语音
+    内置声卡回调函数，声卡需要音频数据时自动填充队列中的音频采样
+    """
     def audio_out_callback(outdata, frames, time_info, status):
+        """音频输出回调函数，声卡驱动自动调用，填充扬声器音频缓冲区"""
         if status:
             print(f"Audio out status: {status}")
         if len(audio_queue_remote) > 0:
@@ -79,9 +99,14 @@ def audio_play_thread():
     stream.close()
 
 
-# ========== 音频采集线程（麦克风采集发送给对方 sounddevice ==========
 def audio_capture_thread(writer, loop):
+    """
+    音频采集线程，读取本机麦克风声音，将音频片段发送至服务端
+    :param writer: 网络连接对象
+    :param loop: asyncio事件循环
+    """
     def audio_in_callback(indata, frames, time_info, status):
+        """音频输入回调函数，声卡驱动自动调用，采集麦克风音频"""
         if status:
             print(f"Audio in status: {status}")
         with video_lock:
@@ -91,6 +116,7 @@ def audio_capture_thread(writer, loop):
         header = f"AUDIO_FRAME:{len(audio_bytes)}\n".encode()
 
         async def send_audio():
+            """协程任务：将采集到的音频数据发送给服务端"""
             try:
                 writer.write(header + audio_bytes)
                 await writer.drain()
@@ -100,6 +126,7 @@ def audio_capture_thread(writer, loop):
                 audio_stop_event.set()
                 with video_lock:
                     in_video = False
+
         asyncio.run_coroutine_threadsafe(send_audio(), loop)
 
     stream = sd.InputStream(
@@ -117,10 +144,16 @@ def audio_capture_thread(writer, loop):
 
 
 async def receive_loop(reader, writer):
+    """
+    消息接收协程，持续接收服务端转发的所有数据
+    解析消息类型：文本、文件、通话指令、视频帧、音频帧，做对应处理
+    :param reader: 网络数据读取对象
+    :param writer: 网络数据写入对象
+    """
     global in_video
     try:
         while True:
-            # 只读取消息头部一行（文本头）
+            # 读取消息头部一行，作为协议标识
             line = await reader.readline()
             if not line:
                 print("\n服务端已断开连接")
@@ -132,7 +165,7 @@ async def receive_loop(reader, writer):
             if not line:
                 continue
 
-            # ========= 文件接收 =========
+            # ========= 文件接收处理 =========
             if line.startswith("FILE:"):
                 _, sender, filename, file_size_str = line.split(":", 3)
                 file_size = int(file_size_str)
@@ -154,7 +187,7 @@ async def receive_loop(reader, writer):
                 print("> ", end="", flush=True)
                 continue
 
-            # ========= 通话控制消息 =========
+            # ========= 通话控制消息处理 =========
             if line.startswith("CALL_INVITE:"):
                 _, inviter = line.split(":", 1)
                 print(f"\n📹 {inviter} 发起【音视频】通话邀请，输入 y 接受 / n 拒绝：")
@@ -176,13 +209,13 @@ async def receive_loop(reader, writer):
                 print("> ", end="", flush=True)
                 continue
 
-            # ========= 视频帧：读取指定长度二进制 =========
+            # ========= 视频帧处理：读取指定长度二进制图像数据 =========
             if line.startswith("VIDEO_FRAME:"):
                 _, frame_size_str = line.split(":", 1)
                 frame_size = int(frame_size_str)
                 with video_lock:
                     if not in_video:
-                        # 未接通通话，丢弃这一整帧二进制数据
+                        # 当前未通话，丢弃这一段二进制数据，防止解析错乱
                         await reader.readexactly(frame_size)
                         continue
                 try:
@@ -194,13 +227,13 @@ async def receive_loop(reader, writer):
                     frame_queue_remote.append(frame)
                 continue
 
-            # ========= 音频帧：读取指定长度二进制【修复乱码核心】 =========
+            # ========= 音频帧处理：读取指定长度二进制音频数据 =========
             if line.startswith("AUDIO_FRAME:"):
                 _, frame_size_str = line.split(":", 1)
                 frame_size = int(frame_size_str)
                 with video_lock:
                     if not in_video:
-                        # 未接通通话，丢弃这一整帧二进制数据
+                        # 当前未通话，丢弃这一段二进制数据，防止解析错乱
                         await reader.readexactly(frame_size)
                         continue
                 try:
@@ -210,7 +243,7 @@ async def receive_loop(reader, writer):
                 audio_queue_remote.append(frame_data)
                 continue
 
-            # ========= 普通文本消息（只有到这里才打印） =========
+            # ========= 普通文本消息，直接打印在控制台 =========
             print(f"\n{line}")
             print("> ", end="", flush=True)
     except asyncio.CancelledError:
@@ -218,6 +251,7 @@ async def receive_loop(reader, writer):
     except Exception as e:
         print(f"\n接收出错: {e}")
     finally:
+        # 连接异常，关闭音视频相关线程
         with video_lock:
             if in_video:
                 video_stop_event.set()
@@ -227,7 +261,12 @@ async def receive_loop(reader, writer):
 
 
 def video_capture_thread(writer, loop):
-    """采集：发送到服务端 + 送入本地预览队列，增加自拍镜像"""
+    """
+    视频采集线程
+    读取本机摄像头画面，做镜像翻转；画面存入本地预览队列，压缩后发送给服务端
+    :param writer: 网络连接对象
+    :param loop: asyncio事件循环
+    """
     global cap, in_video, video_stop_event
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -255,13 +294,14 @@ def video_capture_thread(writer, loop):
             # 水平翻转，自拍镜像效果
             frame = cv2.flip(frame, 1)
             frame_queue_local.append(frame.copy())
-            # 压缩编码发送给对方
+            # 图像缩放并JPEG压缩，减少网络传输流量
             frame_send = cv2.resize(frame, (480, 320))
             _, jpeg = cv2.imencode('.jpg', frame_send, [cv2.IMWRITE_JPEG_QUALITY, 60])
             frame_bytes = jpeg.tobytes()
             header = f"VIDEO_FRAME:{len(frame_bytes)}\n".encode()
 
             async def send_frame():
+                """协程任务：将压缩后的图像帧发送给服务端"""
                 try:
                     writer.write(header + frame_bytes)
                     await writer.drain()
@@ -271,6 +311,7 @@ def video_capture_thread(writer, loop):
                     audio_stop_event.set()
                     with video_lock:
                         in_video = False
+
             asyncio.run_coroutine_threadsafe(send_frame(), loop)
             time.sleep(0.06)
     except Exception as e:
@@ -285,6 +326,12 @@ def video_capture_thread(writer, loop):
 
 
 async def start_video(writer, loop):
+    """
+    开启音视频通话
+    修改通话状态，依次启动视频采集、画面渲染、音频采集、音频播放四个子线程
+    :param writer: 网络连接对象
+    :param loop: asyncio事件循环
+    """
     global in_video, video_stop_event, render_stop_event, audio_stop_event, global_writer, global_loop
     global_writer = writer
     global_loop = loop
@@ -296,7 +343,7 @@ async def start_video(writer, loop):
         video_stop_event.clear()
         render_stop_event.clear()
         audio_stop_event.clear()
-    # 启动视频采集、渲染、音频采集、音频播放四个线程
+    # 启动4个守护子线程，分别负责视频采集、画面渲染、音频采集、音频播放
     threading.Thread(target=video_capture_thread, args=(writer, loop), daemon=True).start()
     threading.Thread(target=render_thread, daemon=True).start()
     threading.Thread(target=audio_capture_thread, args=(writer, loop), daemon=True).start()
@@ -304,6 +351,11 @@ async def start_video(writer, loop):
 
 
 async def stop_video(writer):
+    """
+    挂断音视频通话
+    修改通话状态，设置线程停止事件，向服务端发送挂断通知
+    :param writer: 网络连接对象
+    """
     global in_video, video_stop_event, render_stop_event, audio_stop_event
     with video_lock:
         if not in_video:
@@ -320,6 +372,12 @@ async def stop_video(writer):
 
 
 async def tcp_client(server_ip, port):
+    """
+    客户端主协程
+    建立TCP连接，读取用户控制台输入指令，分发处理文本、文件、音视频通话指令
+    :param server_ip: 服务端IP地址
+    :param port: 服务端端口号
+    """
     global in_video
     try:
         reader, writer = await asyncio.open_connection(server_ip, port)
@@ -368,6 +426,7 @@ async def tcp_client(server_ip, port):
             if msg.strip():
                 writer.write((msg + '\n').encode())
                 await writer.drain()
+        # 退出前，如果正在通话，先挂断音视频
         if in_video:
             await stop_video(writer)
         print("正在断开...")
@@ -381,6 +440,11 @@ async def tcp_client(server_ip, port):
 
 
 async def send_file(writer, file_path):
+    """
+    读取本地文件，分块发送文件数据到服务端
+    :param writer: 网络连接对象
+    :param file_path: 本地待发送文件路径
+    """
     if not os.path.exists(file_path):
         print(f"❌ 文件不存在: {file_path}")
         return
@@ -404,6 +468,7 @@ async def send_file(writer, file_path):
 
 
 if __name__ == "__main__":
+    # 读取命令行参数：服务端IP与端口
     if len(sys.argv) != 3:
         print("用法: python client.py <服务器IP> <端口>")
         print("示例: python client.py 127.0.0.1 8080")

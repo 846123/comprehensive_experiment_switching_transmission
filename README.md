@@ -1,5 +1,8 @@
 # comprehensive_experiment_switching_transmission
-《交换与传输综合实验》张锐*张春霞
+《交换与传输综合实验》<br>
+任课老师：张锐、张春霞<br>
+项目实现：神、王
+
 # 局域网音视频聊天室
 基于Python asyncio TCP实现的多客户端聊天室，支持文本通信、文件传输、音视频通话。两台设备接入同一局域网即可运行。
 

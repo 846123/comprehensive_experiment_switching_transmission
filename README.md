@@ -61,6 +61,7 @@ sounddevice
 python server.py
 ```
 服务端默认监听 `0.0.0.0:8080`
+
 3. 在客户端机器运行客户端，传入服务端内网IP与端口：
 ```powershell
 python client.py 10.59.9.105 8080

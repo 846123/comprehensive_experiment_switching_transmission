@@ -7,60 +7,47 @@ import threading
 import time
 from collections import deque
 import sounddevice as sd
-import random
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog, QDialog, QMessageBox)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QFont
 
 # ===================== 全局音视频状态变量 =====================
-# 是否处于音视频通话状态
 in_video = False
-# 摄像头捕获对象
 cap = None
-# 视频采集线程停止事件
 video_stop_event = threading.Event()
-# 画面渲染线程停止事件
 render_stop_event = threading.Event()
-# 音频播放线程停止事件
 audio_stop_event = threading.Event()
-# 多线程互斥锁，保护音视频全局状态，防止多线程竞争访问
 video_lock = threading.Lock()
 
-# 远端对方画面帧队列，最大长度1，自动丢弃旧帧，降低画面延迟
 frame_queue_remote = deque(maxlen=1)
-# 本地摄像头预览画面帧队列，最大长度1
 frame_queue_local = deque(maxlen=1)
-# 远端音频数据缓冲区，缓存对方音频片段，上限8防止音频堆积
 audio_queue_remote = deque(maxlen=8)
 
-# 网络连接对象，供子线程调用
 global_writer = None
-# asyncio事件循环对象，供子线程提交协程任务
 global_loop = None
-# 视频窗口名称
 window_name = "VideoCall"
 
-# 音频固定配置参数
-CHUNK = 1024        # 单次音频采样块大小
-CHANNELS = 1        # 单声道
-RATE = 16000        # 音频采样率 16000Hz
+CHUNK = 1024
+CHANNELS = 1
+RATE = 16000
 
 # ==================== 扫雷全局状态 ====================
 in_minesweeper = False
 mine_stop_event = threading.Event()
 mine_lock = threading.Lock()
 
-# 扫雷配置
 MINE_ROW = 16
 MINE_COL = 20
 MINE_COUNT = 40
 
-# 格子状态常量
 CELL_UNOPEN = 0
 CELL_OPENED = 1
 CELL_FLAG = 2
 
-def minesweeper_thread():
-    """扫雷渲染与游戏逻辑线程，独立OpenCV窗口"""
-    global in_minesweeper
 
+def minesweeper_thread():
+    global in_minesweeper
     win_name = "Minesweeper"
     cell_size = 30
     MINE_W = MINE_COL * cell_size
@@ -69,27 +56,24 @@ def minesweeper_thread():
     colors = {
         CELL_UNOPEN: (180, 180, 180),
         CELL_OPENED: (220, 220, 220),
-        CELL_FLAG:   (50, 50, 255)
+        CELL_FLAG: (50, 50, 255)
     }
     num_color = [
         (0, 0, 255), (0, 128, 0), (255, 0, 0), (128, 0, 128),
         (0, 0, 128), (128, 128, 0), (0, 128, 128), (128, 128, 128)
     ]
-    dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    dirs = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
-    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)  # 锁定尺寸，禁止拉伸
-
+    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
+    import random
     while not mine_stop_event.is_set():
-        # ---- 一局开始，重置棋盘 ----
         board_state = [[CELL_UNOPEN for _ in range(MINE_COL)] for _ in range(MINE_ROW)]
-        is_mine = [[False]*MINE_COL for _ in range(MINE_ROW)]
-        near_mine_cnt = [[0]*MINE_COL for _ in range(MINE_ROW)]
-        game_over = False
-        game_win = False
+        is_mine = [[False] * MINE_COL for _ in range(MINE_ROW)]
+        near_mine_cnt = [[0] * MINE_COL for _ in range(MINE_ROW)]
 
         mines = set()
         while len(mines) < MINE_COUNT:
-            mines.add((random.randint(0, MINE_ROW-1), random.randint(0, MINE_COL-1)))
+            mines.add((random.randint(0, MINE_ROW - 1), random.randint(0, MINE_COL - 1)))
         for r, c in mines:
             is_mine[r][c] = True
         for r in range(MINE_ROW):
@@ -98,7 +82,7 @@ def minesweeper_thread():
                     continue
                 cnt = 0
                 for dr, dc in dirs:
-                    nr, nc = r+dr, c+dc
+                    nr, nc = r + dr, c + dc
                     if 0 <= nr < MINE_ROW and 0 <= nc < MINE_COL and is_mine[nr][nc]:
                         cnt += 1
                 near_mine_cnt[r][c] = cnt
@@ -124,12 +108,11 @@ def minesweeper_thread():
                             rr, cc = q.pop(0)
                             if near_mine_cnt[rr][cc] == 0:
                                 for dr, dc in dirs:
-                                    nr, nc = rr+dr, cc+dc
+                                    nr, nc = rr + dr, cc + dc
                                     if 0 <= nr < MINE_ROW and 0 <= nc < MINE_COL:
                                         if board_state[nr][nc] == CELL_UNOPEN and not is_mine[nr][nc]:
                                             board_state[nr][nc] = CELL_OPENED
                                             q.append((nr, nc))
-                # 胜利判定：所有非雷格都被打开
                 opened = sum(row.count(CELL_OPENED) for row in board_state)
                 if opened == MINE_ROW * MINE_COL - MINE_COUNT:
                     state_box["win"] = True
@@ -145,32 +128,29 @@ def minesweeper_thread():
             img = np.ones((MINE_H, MINE_W, 3), dtype=np.uint8) * 200
             for r in range(MINE_ROW):
                 for c in range(MINE_COL):
-                    x1, y1 = c*cell_size, r*cell_size
-                    x2, y2 = x1+cell_size, y1+cell_size
+                    x1, y1 = c * cell_size, r * cell_size
+                    x2, y2 = x1 + cell_size, y1 + cell_size
                     st = board_state[r][c]
                     cv2.rectangle(img, (x1, y1), (x2, y2), colors[st], -1)
                     cv2.rectangle(img, (x1, y1), (x2, y2), (50, 50, 50), 1)
                     if st == CELL_OPENED and near_mine_cnt[r][c] > 0:
                         cv2.putText(img, str(near_mine_cnt[r][c]),
-                                    (x1+8, y1+22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                    num_color[near_mine_cnt[r][c]-1], 2)
-                    # 插旗
+                                    (x1 + 8, y1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                    num_color[near_mine_cnt[r][c] - 1], 2)
                     if st == CELL_FLAG:
-                        cv2.line(img, (x1+8, y1+22), (x1+8, y1+8), (0, 0, 200), 2)
-                        cv2.putText(img, "|", (x1+6, y1+22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,200), 2)
-                    # 游戏结束：翻开所有雷
+                        cv2.line(img, (x1 + 8, y1 + 22), (x1 + 8, y1 + 8), (0, 0, 200), 2)
+                        cv2.putText(img, "|", (x1 + 6, y1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 200), 2)
                     if state_box["over"] and is_mine[r][c] and st != CELL_FLAG:
-                        cv2.circle(img, ((x1+x2)//2, (y1+y2)//2), 8, (0, 0, 0), -1)
+                        cv2.circle(img, ((x1 + x2) // 2, (y1 + y2) // 2), 8, (0, 0, 0), -1)
 
-            # 结束/胜利文字覆盖层
             if state_box["over"]:
-                cv2.rectangle(img, (0, MINE_H//2-30), (MINE_W, MINE_H//2+30), (0, 0, 0), -1)
+                cv2.rectangle(img, (0, MINE_H // 2 - 30), (MINE_W, MINE_H // 2 + 30), (0, 0, 0), -1)
                 cv2.putText(img, "GAME OVER  (r:restart  q:quit)",
-                            (30, MINE_H//2+10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            (30, MINE_H // 2 + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             if state_box["win"]:
-                cv2.rectangle(img, (0, MINE_H//2-30), (MINE_W, MINE_H//2+30), (0, 100, 0), -1)
+                cv2.rectangle(img, (0, MINE_H // 2 - 30), (MINE_W, MINE_H // 2 + 30), (0, 100, 0), -1)
                 cv2.putText(img, "YOU WIN!  (r:restart  q:quit)",
-                            (60, MINE_H//2+10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                            (60, MINE_H // 2 + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             cv2.imshow(win_name, img)
             key = cv2.waitKey(20) & 0xFF
@@ -178,34 +158,30 @@ def minesweeper_thread():
                 mine_stop_event.set()
                 break
             if key == ord('r') and (state_box["over"] or state_box["win"]):
-                break  # 跳出内层循环，外层 while 重新开局
-
+                break
     try:
         cv2.destroyWindow(win_name)
     except Exception:
         pass
     with mine_lock:
+        global in_minesweeper
         in_minesweeper = False
-    print("\n💣 扫雷已关闭")
-    print("> ", end="", flush=True)
 
 
 async def start_minesweeper():
-    """启动扫雷，和视频通话互斥"""
     global in_minesweeper
     with mine_lock:
         if in_minesweeper:
-            print("⚠️ 扫雷已经打开")
-            return
+            return False
         if in_video:
-            print("⚠️ 正在音视频通话，无法打开扫雷！")
-            return
+            return False
         in_minesweeper = True
         mine_stop_event.clear()
     threading.Thread(target=minesweeper_thread, daemon=True).start()
+    return True
+
 
 async def stop_minesweeper():
-    """关闭扫雷"""
     global in_minesweeper
     with mine_lock:
         if not in_minesweeper:
@@ -213,12 +189,8 @@ async def stop_minesweeper():
         in_minesweeper = False
         mine_stop_event.set()
 
+
 def render_thread():
-    """
-    画面渲染独立线程
-    读取本地预览队列与远端画面队列，左右拼接分屏，创建窗口展示画面
-    按下q键触发挂断音视频通话
-    """
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     blank = np.zeros((320, 480, 3), dtype=np.uint8)
     last_remote = blank
@@ -234,20 +206,15 @@ def render_thread():
         cv2.imshow(window_name, combined)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
-            print("\n⌨️ 按q挂断视频音频")
             if global_loop and global_writer:
                 asyncio.run_coroutine_threadsafe(stop_video(global_writer), global_loop)
     cv2.destroyWindow(window_name)
 
+
 def audio_play_thread():
-    """
-    音频播放线程，负责播放远端传来的对方语音
-    内置声卡回调函数，声卡需要音频数据时自动填充队列中的音频采样
-    """
     def audio_out_callback(outdata, frames, time_info, status):
-        """音频输出回调函数，声卡驱动自动调用，填充扬声器音频缓冲区"""
         if status:
-            print(f"Audio out status: {status}")
+            pass
         if len(audio_queue_remote) > 0:
             audio_bytes = audio_queue_remote.popleft()
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
@@ -268,16 +235,11 @@ def audio_play_thread():
     stream.stop()
     stream.close()
 
+
 def audio_capture_thread(writer, loop):
-    """
-    音频采集线程，读取本机麦克风声音，将音频片段发送至服务端
-    :param writer: 网络连接对象
-    :param loop: asyncio事件循环
-    """
     def audio_in_callback(indata, frames, time_info, status):
-        """音频输入回调函数，声卡驱动自动调用，采集麦克风音频"""
         if status:
-            print(f"Audio in status: {status}")
+            pass
         with video_lock:
             if not in_video:
                 return
@@ -285,7 +247,6 @@ def audio_capture_thread(writer, loop):
         header = f"AUDIO_FRAME:{len(audio_bytes)}\n".encode()
 
         async def send_audio():
-            """协程任务：将采集到的音频数据发送给服务端"""
             try:
                 writer.write(header + audio_bytes)
                 await writer.drain()
@@ -294,6 +255,7 @@ def audio_capture_thread(writer, loop):
                 render_stop_event.set()
                 audio_stop_event.set()
                 with video_lock:
+                    global in_video
                     in_video = False
 
         asyncio.run_coroutine_threadsafe(send_audio(), loop)
@@ -311,138 +273,14 @@ def audio_capture_thread(writer, loop):
     stream.stop()
     stream.close()
 
-async def receive_loop(reader, writer):
-    """
-    消息接收协程，持续接收服务端转发的所有数据
-    解析消息类型：文本、文件、通话指令、视频帧、音频帧，做对应处理
-    :param reader: 网络数据读取对象
-    :param writer: 网络数据写入对象
-    """
-    global in_video
-    try:
-        while True:
-            # 读取消息头部一行，作为协议标识
-            line = await reader.readline()
-            if not line:
-                print("\n服务端已断开连接")
-                break
-            try:
-                line = line.decode().rstrip('\n')
-            except UnicodeDecodeError:
-                continue
-            if not line:
-                continue
-
-            # ========= 文件接收处理 =========
-            if line.startswith("FILE:"):
-                _, sender, filename, file_size_str = line.split(":", 3)
-                file_size = int(file_size_str)
-                save_name = f"received_{filename}"
-                print(f"\n📥 正在接收 {sender} 传输的文件: {filename} (大小: {file_size / 1024:.1f}KB)")
-                print(f"💾 将保存为: {save_name}")
-                received = 0
-                with open(save_name, 'wb') as f:
-                    while received < file_size:
-                        chunk_size = min(4096, file_size - received)
-                        chunk = await reader.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        received += len(chunk)
-                        progress = received / file_size * 100
-                        print(f"\r⏳ 接收进度: {progress:.1f}%", end="", flush=True)
-                print(f"\n✅ 文件 {save_name} 接收完成!")
-                print("> ", end="", flush=True)
-                continue
-
-            # ========= 通话控制消息处理 =========
-            if line.startswith("CALL_INVITE:"):
-                _, inviter = line.split(":", 1)
-                print(f"\n📹 {inviter} 发起【音视频】通话邀请，输入 y 接受 / n 拒绝：")
-                print("> ", end="", flush=True)
-                continue
-            if line.startswith("CALL_ACCEPT:"):
-                _, user = line.split(":", 1)
-                print(f"\n✅ {user} 加入音视频通话")
-                print("> ", end="", flush=True)
-                continue
-            if line.startswith("CALL_REJECT:"):
-                _, user = line.split(":", 1)
-                print(f"\n❌ {user} 拒绝了音视频邀请")
-                print("> ", end="", flush=True)
-                continue
-            if line.startswith("CALL_HANGUP:"):
-                _, user = line.split(":", 1)
-                print(f"\n👋 {user} 挂断音视频通话")
-                print("> ", end="", flush=True)
-                continue
-
-            # ========= 视频帧处理：读取指定长度二进制图像数据 =========
-            if line.startswith("VIDEO_FRAME:"):
-                _, frame_size_str = line.split(":", 1)
-                frame_size = int(frame_size_str)
-                with video_lock:
-                    if not in_video:
-                        # 当前未通话，丢弃这一段二进制数据，防止解析错乱
-                        await reader.readexactly(frame_size)
-                        continue
-                try:
-                    frame_data = await reader.readexactly(frame_size)
-                except asyncio.IncompleteReadError:
-                    continue
-                frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
-                if frame is not None:
-                    frame_queue_remote.append(frame)
-                continue
-
-            # ========= 音频帧处理：读取指定长度二进制音频数据 =========
-            if line.startswith("AUDIO_FRAME:"):
-                _, frame_size_str = line.split(":", 1)
-                frame_size = int(frame_size_str)
-                with video_lock:
-                    if not in_video:
-                        # 当前未通话，丢弃这一段二进制数据，防止解析错乱
-                        await reader.readexactly(frame_size)
-                        continue
-                try:
-                    frame_data = await reader.readexactly(frame_size)
-                except asyncio.IncompleteReadError:
-                    continue
-                audio_queue_remote.append(frame_data)
-                continue
-
-            # ========= 普通文本消息，直接打印在控制台 =========
-            print(f"\n{line}")
-            print("> ", end="", flush=True)
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        print(f"\n接收出错: {e}")
-    finally:
-        # 连接异常，关闭音视频相关线程
-        with video_lock:
-            if in_video:
-                video_stop_event.set()
-                render_stop_event.set()
-                audio_stop_event.set()
-                in_video = False
 
 def video_capture_thread(writer, loop):
-    """
-    视频采集线程
-    读取本机摄像头画面，做镜像翻转；画面存入本地预览队列，压缩后发送给服务端
-    :param writer: 网络连接对象
-    :param loop: asyncio事件循环
-    """
     global cap, in_video, video_stop_event
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
-        print("\n❌ 无法打开摄像头")
         with video_lock:
             in_video = False
         return
-    print("\n📹 音视频通话已连接，按q关闭窗口或输入/hangup挂断")
-    print("> ", end="", flush=True)
     try:
         while not video_stop_event.is_set():
             with video_lock:
@@ -455,20 +293,16 @@ def video_capture_thread(writer, loop):
                 ret, frame = cap.read()
                 time.sleep(0.01)
             if not ret:
-                print("\n⚠️ 摄像头读取失败，尝试重试...")
                 time.sleep(0.15)
                 continue
-            # 水平翻转，自拍镜像效果
             frame = cv2.flip(frame, 1)
             frame_queue_local.append(frame.copy())
-            # 图像缩放并JPEG压缩，减少网络传输流量
             frame_send = cv2.resize(frame, (480, 320))
             _, jpeg = cv2.imencode('.jpg', frame_send, [cv2.IMWRITE_JPEG_QUALITY, 60])
             frame_bytes = jpeg.tobytes()
             header = f"VIDEO_FRAME:{len(frame_bytes)}\n".encode()
 
             async def send_frame():
-                """协程任务：将压缩后的图像帧发送给服务端"""
                 try:
                     writer.write(header + frame_bytes)
                     await writer.drain()
@@ -477,50 +311,39 @@ def video_capture_thread(writer, loop):
                     render_stop_event.set()
                     audio_stop_event.set()
                     with video_lock:
+                        global in_video
                         in_video = False
 
             asyncio.run_coroutine_threadsafe(send_frame(), loop)
             time.sleep(0.06)
     except Exception as e:
-        print(f"\n视频采集异常: {e}")
+        pass
     finally:
         if cap is not None:
             cap.release()
         with video_lock:
             in_video = False
-        print("\n📹 音视频通话已结束")
-        print("> ", end="", flush=True)
+
 
 async def start_video(writer, loop):
-    """
-    开启音视频通话
-    修改通话状态，依次启动视频采集、画面渲染、音频采集、音频播放四个子线程
-    :param writer: 网络连接对象
-    :param loop: asyncio事件循环
-    """
     global in_video, video_stop_event, render_stop_event, audio_stop_event, global_writer, global_loop
     global_writer = writer
     global_loop = loop
     with video_lock:
         if in_video:
-            print("⚠️ 已经在音视频通话中")
-            return
+            return False
         in_video = True
         video_stop_event.clear()
         render_stop_event.clear()
         audio_stop_event.clear()
-    # 启动4个守护子线程，分别负责视频采集、画面渲染、音频采集、音频播放
     threading.Thread(target=video_capture_thread, args=(writer, loop), daemon=True).start()
     threading.Thread(target=render_thread, daemon=True).start()
     threading.Thread(target=audio_capture_thread, args=(writer, loop), daemon=True).start()
     threading.Thread(target=audio_play_thread, daemon=True).start()
+    return True
+
 
 async def stop_video(writer):
-    """
-    挂断音视频通话
-    修改通话状态，设置线程停止事件，向服务端发送挂断通知
-    :param writer: 网络连接对象
-    """
     global in_video, video_stop_event, render_stop_event, audio_stop_event
     with video_lock:
         if not in_video:
@@ -535,119 +358,442 @@ async def stop_video(writer):
     except Exception:
         pass
 
-async def tcp_client(server_ip, port):
-    """
-    客户端主协程
-    建立TCP连接，读取用户控制台输入指令，分发处理文本、文件、音视频通话指令
-    :param server_ip: 服务端IP地址
-    :param port: 服务端端口号
-    """
-    global in_video
-    try:
-        reader, writer = await asyncio.open_connection(server_ip, port)
-        print(f"已连接到 {server_ip}:{port}")
-        prompt = await reader.readline()
-        print(prompt.decode(), end="", flush=True)
-        nickname = await asyncio.get_running_loop().run_in_executor(None, input)
-        nickname = nickname.strip() or "匿名"
-        writer.write((nickname + '\n').encode())
-        await writer.drain()
-        print("\n💬 直接输入文字发送消息")
-        print("📁 输入 /send <文件路径> 发送文件")
-        print("📹 输入 /call 发起【音视频】通话")
-        print("💣 输入 /mine 打开扫雷 | /exitmine 关闭扫雷")
-        print("❌ 输入 /hangup 挂断 | quit 退出程序")
-        print("-" * 50)
-        recv_task = asyncio.create_task(receive_loop(reader, writer))
-        loop = asyncio.get_running_loop()
-        while True:
-            msg = await loop.run_in_executor(None, input, "> ")
-            if msg.lower() == 'quit':
-                break
-            if msg.startswith("/send "):
-                file_path = msg[6:].strip()
-                if file_path.startswith(('"', "'")) and file_path.endswith(('"', "'")):
-                    file_path = file_path[1:-1]
-                await send_file(writer, file_path)
-                continue
-            if msg == '/call':
-                # 扫雷打开时禁止开视频
-                if in_minesweeper:
-                    print("⚠️ 正在玩扫雷，不能发起音视频通话")
-                    continue
-                writer.write(b"CALL_INVITE:me\n")
-                await writer.drain()
-                await start_video(writer, loop)
-                continue
-            if msg == '/hangup':
-                await stop_video(writer)
-                continue
-            if msg == '/mine':
-                await start_minesweeper()
-                continue
-            if msg == '/exitmine':
-                await stop_minesweeper()
-                continue
-            if msg.lower() == 'y' and not in_video:
-                writer.write(b"CALL_ACCEPT:me\n")
-                await writer.drain()
-                await start_video(writer, loop)
-                continue
-            if msg.lower() == 'n':
-                writer.write(b"CALL_REJECT:me\n")
-                await writer.drain()
-                print("✅ 已拒绝邀请")
-                continue
-            if msg.strip():
-                writer.write((msg + '\n').encode())
-                await writer.drain()
-        # 退出前，如果正在通话，先挂断音视频
-        if in_video:
-            await stop_video(writer)
-        if in_minesweeper:
-            await stop_minesweeper()
-        print("正在断开...")
-        writer.close()
-        await writer.wait_closed()
-        recv_task.cancel()
-    except ConnectionRefusedError:
-        print("❌ 连接失败: 服务端未启动或地址/端口错误")
-    except Exception as e:
-        print(f"❌ 客户端异常: {e}")
 
-async def send_file(writer, file_path):
-    """
-    读取本地文件，分块发送文件数据到服务端
-    :param writer: 网络连接对象
-    :param file_path: 本地待发送文件路径
-    """
-    if not os.path.exists(file_path):
-        print(f"❌ 文件不存在: {file_path}")
-        return
-    file_size = os.path.getsize(file_path)
-    filename = os.path.basename(file_path)
-    header = f"FILE:{filename}:{file_size}\n".encode()
-    writer.write(header)
-    await writer.drain()
-    sent = 0
-    with open(file_path, 'rb') as f:
+# ===================== PyQt GUI 部分 =====================
+class CallFloatWidget(QWidget):
+    """右侧居中、半透明的音视频邀请浮窗"""
+    accept_signal = pyqtSignal()
+    reject_signal = pyqtSignal()
+
+    def __init__(self, inviter_name):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(420, 90)
+
+        self.setWindowOpacity(0.8)
+
+        container = QWidget()
+        container.setStyleSheet("background-color:#f7f7f7;border:1px solid #cfcfcf;border-radius:10px;")
+
+        label = QLabel(f"{inviter_name} 发起音视频通话")
+        label.setFont(QFont("SimHei", 12))
+        label.setStyleSheet("color:#222;")
+
+        btn_accept = QPushButton("Accept")
+        btn_reject = QPushButton("Reject")
+        btn_accept.setFixedSize(80, 36)
+        btn_reject.setFixedSize(80, 36)
+        btn_accept.setStyleSheet(
+            "background-color:#2ecc71;color:white;font-size:14px;border-radius:6px;"
+        )
+        btn_reject.setStyleSheet(
+            "background-color:#e74c3c;color:white;font-size:14px;border-radius:6px;"
+        )
+        btn_accept.clicked.connect(self.accept_signal.emit)
+        btn_reject.clicked.connect(self.reject_signal.emit)
+
+        h_layout = QHBoxLayout(container)
+        h_layout.setContentsMargins(18, 0, 18, 0)
+        h_layout.addWidget(label)
+        h_layout.addStretch(1)
+        h_layout.addWidget(btn_accept)
+        h_layout.addSpacing(10)
+        h_layout.addWidget(btn_reject)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(container)
+
+        # 定位到屏幕右侧垂直居中
+        screen = QApplication.desktop().availableGeometry()
+        self.move(screen.right() - self.width() - 40, screen.center().y() - self.height() // 2)
+
+
+class LoginDialog(QDialog):
+    """无边框英文登录窗口，空IP/空昵称拦截，错误清空输入框"""
+    def __init__(self):
+        super().__init__()
+        self.resize(720, 520)
+        self.setMinimumSize(720, 520)
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self._drag_pos = None
+
+        main_widget = QWidget()
+        main_widget.setStyleSheet("""
+            QWidget#main{
+                background-color:#f0f0f0;
+                border-radius:12px;
+            }
+        """)
+        main_widget.setObjectName("main")
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(0,0,0,0)
+        main_layout.setSpacing(0)
+
+        # 标题栏
+        title_bar = QWidget()
+        title_bar.setFixedHeight(48)
+        title_bar.setStyleSheet("background-color:#f8f4f0; border-top-left-radius:12px;border-top-right-radius:12px;")
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(16,0,16,0)
+
+        title_label = QLabel("Login...")
+        title_label.setFont(QFont("Segoe UI",14))
+
+        btn_close = QPushButton("×")
+        btn_close.setFixedSize(32,32)
+        btn_close.setStyleSheet("""
+            QPushButton{border:none;font-size:20px;}
+            QPushButton:hover{background-color:#e8e2de;}
+        """)
+        btn_close.clicked.connect(self.reject)
+
+        title_layout.addWidget(title_label)
+        title_layout.addStretch(1)
+        title_layout.addWidget(btn_close)
+
+        # 拖动逻辑
+        def mousePressEvent_title(event):
+            if event.button() == Qt.LeftButton:
+                self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+                event.accept()
+        def mouseMoveEvent_title(event):
+            if event.buttons() & Qt.LeftButton and self._drag_pos is not None:
+                self.move(event.globalPos() - self._drag_pos)
+                event.accept()
+        title_bar.mousePressEvent = mousePressEvent_title
+        title_bar.mouseMoveEvent = mouseMoveEvent_title
+
+        # 内容区域
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(100, 80, 100, 60)
+        content_layout.setSpacing(30)
+
+        title_content = QLabel("Connect to ChatRoom")
+        title_content.setFont(QFont("Segoe UI",20))
+        title_content.setAlignment(Qt.AlignCenter)
+
+        self.ip_edit = QLineEdit("127.0.0.1")
+        self.ip_edit.setPlaceholderText("Server IP Address")
+        self.ip_edit.setFixedHeight(48)
+        self.ip_edit.setFont(QFont("Segoe UI",12))
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Your Nickname")
+        self.name_edit.setFixedHeight(48)
+        self.name_edit.setFont(QFont("Segoe UI",12))
+
+        self.btn_conn = QPushButton("Connect")
+        self.btn_conn.setFixedHeight(58)
+        self.btn_conn.setFont(QFont("Segoe UI",15))
+        self.btn_conn.clicked.connect(self.on_connect_click)
+
+        content_layout.addWidget(title_content)
+        content_layout.addWidget(QLabel("Server IP"))
+        content_layout.addWidget(self.ip_edit)
+        content_layout.addWidget(QLabel("User Nickname"))
+        content_layout.addWidget(self.name_edit)
+        content_layout.addWidget(self.btn_conn)
+
+        main_layout.addWidget(title_bar)
+        main_layout.addWidget(content_widget)
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0,0,0,0)
+        root_layout.addWidget(main_widget)
+
+    def on_connect_click(self):
+        ip_text = self.ip_edit.text().strip()
+        nick_text = self.name_edit.text().strip()
+        if not ip_text:
+            QMessageBox.warning(self, "Warning", "Server IP cannot be empty!")
+            self.ip_edit.clear()
+            return
+        if not nick_text:
+            QMessageBox.warning(self, "Warning", "Nickname cannot be empty!")
+            self.name_edit.clear()
+            return
+        self.accept()
+
+    def get_info(self):
+        return self.ip_edit.text().strip(), self.name_edit.text().strip()
+
+
+class ChatMainWindow(QMainWindow):
+    add_msg_signal = pyqtSignal(str)
+    call_invite_signal = pyqtSignal(str)
+    conn_fail_signal = pyqtSignal(str)
+
+    def __init__(self, server_ip, nickname):
+        super().__init__()
+        self.setWindowTitle(f"ChatRoom - {nickname}")
+        self.resize(720, 540)
+        self.server_ip = server_ip
+        self.nickname = nickname
+        self.writer = None
+        self.loop = None
+        self.float_win = None
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        vlayout = QVBoxLayout(central)
+        vlayout.setContentsMargins(12, 12, 12, 12)
+        vlayout.setSpacing(10)
+
+        self.msg_area = QTextEdit()
+        self.msg_area.setReadOnly(True)
+        self.msg_area.setFont(QFont("SimHei", 10))
+        vlayout.addWidget(self.msg_area)
+
+        btn_layout = QHBoxLayout()
+        self.btn_file = QPushButton("Send File")
+        self.btn_call = QPushButton("Start Video Call")
+        self.btn_mine = QPushButton("Minesweeper")
+        for btn in [self.btn_file, self.btn_call, self.btn_mine]:
+            btn.setFixedHeight(38)
+            btn.setFont(QFont("SimHei", 10))
+        btn_layout.addWidget(self.btn_file)
+        btn_layout.addWidget(self.btn_call)
+        btn_layout.addWidget(self.btn_mine)
+        vlayout.addLayout(btn_layout)
+
+        hlayout_input = QHBoxLayout()
+        self.input_edit = QLineEdit()
+        self.input_edit.setPlaceholderText("Input message...")
+        self.input_edit.setFixedHeight(36)
+        self.btn_send = QPushButton("Send")
+        self.btn_send.setFixedWidth(90)
+        self.btn_send.setFixedHeight(36)
+        hlayout_input.addWidget(self.input_edit)
+        hlayout_input.addWidget(self.btn_send)
+        vlayout.addLayout(hlayout_input)
+
+        self.add_msg_signal.connect(self.on_add_msg)
+        self.call_invite_signal.connect(self.show_call_float)
+        self.conn_fail_signal.connect(self.on_conn_failed)
+
+        self.btn_send.clicked.connect(self.send_text)
+        self.input_edit.returnPressed.connect(self.send_text)
+        self.btn_file.clicked.connect(self.on_send_file)
+        self.btn_call.clicked.connect(self.on_start_call)
+        self.btn_mine.clicked.connect(self.on_open_mine)
+
+        self.client_thread = ClientThread(server_ip, 8080, nickname, self.add_msg_signal, self.call_invite_signal, self.conn_fail_signal)
+        self.client_thread.start()
+
+    def on_conn_failed(self, err_msg):
+        QMessageBox.critical(self, "Connection Error", err_msg)
+        self.close()
+
+    def on_add_msg(self, text):
+        self.msg_area.append(text)
+
+    def show_call_float(self, inviter):
+        if self.float_win is not None:
+            return
+        self.float_win = CallFloatWidget(inviter)
+        self.float_win.accept_signal.connect(self.on_call_accept)
+        self.float_win.reject_signal.connect(self.on_call_reject)
+        self.float_win.show()
+
+    def on_call_accept(self):
+        if self.float_win:
+            self.float_win.close()
+            self.float_win = None
+        asyncio.run_coroutine_threadsafe(self.client_thread.accept_call(), self.client_thread.loop)
+
+    def on_call_reject(self):
+        if self.float_win:
+            self.float_win.close()
+            self.float_win = None
+        asyncio.run_coroutine_threadsafe(self.client_thread.reject_call(), self.client_thread.loop)
+
+    def send_text(self):
+        txt = self.input_edit.text().strip()
+        if not txt:
+            return
+        self.input_edit.clear()
+        asyncio.run_coroutine_threadsafe(self.client_thread.send_msg(txt), self.client_thread.loop)
+
+    def on_send_file(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Select File")
+        if not filepath:
+            return
+        asyncio.run_coroutine_threadsafe(self.client_thread.send_file(filepath), self.client_thread.loop)
+
+    def on_start_call(self):
+        asyncio.run_coroutine_threadsafe(self.client_thread.invite_call(), self.client_thread.loop)
+
+    def on_open_mine(self):
+        asyncio.run_coroutine_threadsafe(self.client_thread.open_mine(), self.client_thread.loop)
+
+    def closeEvent(self, event):
+        self.client_thread.stop()
+        event.accept()
+
+
+class ClientThread(QThread):
+    conn_fail_signal = pyqtSignal(str)
+    def __init__(self, ip, port, nick, msg_sig, call_sig, conn_fail_sig):
+        super().__init__()
+        self.ip = ip
+        self.port = port
+        self.nick = nick
+        self.msg_sig = msg_sig
+        self.call_sig = call_sig
+        self.conn_fail_sig = conn_fail_sig
+        self.loop = None
+        self.writer = None
+        self.reader = None
+        self._stop = False
+
+    def run(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.tcp_main())
+
+    async def tcp_main(self):
+        try:
+            self.reader, self.writer = await asyncio.open_connection(self.ip, self.port)
+            prompt = await self.reader.readline()
+            self.writer.write((self.nick + '\n').encode())
+            await self.writer.drain()
+            recv_task = asyncio.create_task(self.receive_loop())
+            while not self._stop:
+                await asyncio.sleep(0.1)
+            recv_task.cancel()
+        except Exception as e:
+            self.conn_fail_sig.emit(f"Connect failed: {str(e)}")
+
+    async def receive_loop(self):
         while True:
-            chunk = f.read(4096)
-            if not chunk:
+            line = await self.reader.readline()
+            if not line:
+                self.msg_sig.emit("Server disconnected")
                 break
-            writer.write(chunk)
-            sent += len(chunk)
-            progress = sent / file_size * 100
-            print(f"\r📤 发送进度: {progress:.1f}%", end="", flush=True)
-    await writer.drain()
-    print(f"\n✅ 文件 {filename} 发送完成!")
+            try:
+                line = line.decode().rstrip('\n')
+            except:
+                continue
+            if line.startswith("FILE:"):
+                _, sender, filename, file_size_str = line.split(":", 3)
+                file_size = int(file_size_str)
+                self.msg_sig.emit(f"📥 {sender} sending file {filename}, receiving...")
+                save_name = f"received_{filename}"
+                received = 0
+                with open(save_name, 'wb') as f:
+                    while received < file_size:
+                        chunk = await self.reader.read(min(4096, file_size - received))
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        received += len(chunk)
+                self.msg_sig.emit(f"✅ Saved as {save_name}")
+                continue
+            if line.startswith("CALL_INVITE:"):
+                _, inviter = line.split(":", 1)
+                self.call_sig.emit(inviter)
+                continue
+            if line.startswith("CALL_ACCEPT:"):
+                _, user = line.split(":", 1)
+                self.msg_sig.emit(f"✅ {user} joined video call")
+                continue
+            if line.startswith("CALL_REJECT:"):
+                _, user = line.split(":", 1)
+                self.msg_sig.emit(f"❌ {user} rejected call")
+                continue
+            if line.startswith("CALL_HANGUP:"):
+                _, user = line.split(":", 1)
+                self.msg_sig.emit(f"👋 {user} hung up")
+                continue
+            if line.startswith("VIDEO_FRAME:"):
+                _, frame_size_str = line.split(":", 1)
+                fs = int(frame_size_str)
+                with video_lock:
+                    if not in_video:
+                        await self.reader.readexactly(fs)
+                        continue
+                try:
+                    frame_data = await self.reader.readexactly(fs)
+                except:
+                    continue
+                frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
+                if frame is not None:
+                    frame_queue_remote.append(frame)
+                continue
+            if line.startswith("AUDIO_FRAME:"):
+                _, frame_size_str = line.split(":", 1)
+                fs = int(frame_size_str)
+                with video_lock:
+                    if not in_video:
+                        await self.reader.readexactly(fs)
+                        continue
+                try:
+                    frame_data = await self.reader.readexactly(fs)
+                except:
+                    continue
+                audio_queue_remote.append(frame_data)
+                continue
+            self.msg_sig.emit(line)
+
+    async def send_msg(self, txt):
+        self.writer.write((txt + '\n').encode())
+        await self.writer.drain()
+
+    async def send_file(self, file_path):
+        if not os.path.exists(file_path):
+            self.msg_sig.emit("File not found")
+            return
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        header = f"FILE:{filename}:{file_size}\n".encode()
+        self.writer.write(header)
+        await self.writer.drain()
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
+                self.writer.write(chunk)
+                await self.writer.drain()
+        await self.writer.drain()
+        self.msg_sig.emit(f"📤 File {filename} sent")
+
+    async def invite_call(self):
+        if in_minesweeper:
+            self.msg_sig.emit("⚠️ Minesweeper running, cannot start call")
+            return
+        self.writer.write(b"CALL_INVITE:me\n")
+        await self.writer.drain()
+        await start_video(self.writer, self.loop)
+
+    async def accept_call(self):
+        self.writer.write(b"CALL_ACCEPT:me\n")
+        await self.writer.drain()
+        await start_video(self.writer, self.loop)
+
+    async def reject_call(self):
+        self.writer.write(b"CALL_REJECT:me\n")
+        await self.writer.drain()
+
+    async def open_mine(self):
+        ret = await start_minesweeper()
+        if ret:
+            self.msg_sig.emit("💣 Minesweeper started")
+        else:
+            self.msg_sig.emit("⚠️ Cannot open minesweeper")
+
+    def stop(self):
+        self._stop = True
+
 
 if __name__ == "__main__":
-    # 读取命令行参数：服务端IP与端口
-    if len(sys.argv) != 3:
-        print("用法: python client.py <服务器IP> <端口>")
-        print("示例: python client.py 127.0.0.1 8080")
-        sys.exit(1)
-    server_ip = sys.argv[1]
-    port = int(sys.argv[2])
-    asyncio.run(tcp_client(server_ip, port))
+    app = QApplication(sys.argv)
+    login = LoginDialog()
+    if login.exec_():
+        ip, name = login.get_info()
+        w = ChatMainWindow(ip, name)
+        w.show()
+        sys.exit(app.exec_())

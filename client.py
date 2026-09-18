@@ -7,6 +7,7 @@ import threading
 import time
 from collections import deque
 import sounddevice as sd
+import random
 
 # ===================== 全局音视频状态变量 =====================
 # 是否处于音视频通话状态
@@ -41,6 +42,176 @@ CHUNK = 1024        # 单次音频采样块大小
 CHANNELS = 1        # 单声道
 RATE = 16000        # 音频采样率 16000Hz
 
+# ==================== 扫雷全局状态 ====================
+in_minesweeper = False
+mine_stop_event = threading.Event()
+mine_lock = threading.Lock()
+
+# 扫雷配置
+MINE_ROW = 16
+MINE_COL = 20
+MINE_COUNT = 40
+
+# 格子状态常量
+CELL_UNOPEN = 0
+CELL_OPENED = 1
+CELL_FLAG = 2
+
+def minesweeper_thread():
+    """扫雷渲染与游戏逻辑线程，独立OpenCV窗口"""
+    global in_minesweeper
+
+    win_name = "Minesweeper"
+    cell_size = 30
+    MINE_W = MINE_COL * cell_size
+    MINE_H = MINE_ROW * cell_size
+
+    colors = {
+        CELL_UNOPEN: (180, 180, 180),
+        CELL_OPENED: (220, 220, 220),
+        CELL_FLAG:   (50, 50, 255)
+    }
+    num_color = [
+        (0, 0, 255), (0, 128, 0), (255, 0, 0), (128, 0, 128),
+        (0, 0, 128), (128, 128, 0), (0, 128, 128), (128, 128, 128)
+    ]
+    dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+
+    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)  # 锁定尺寸，禁止拉伸
+
+    while not mine_stop_event.is_set():
+        # ---- 一局开始，重置棋盘 ----
+        board_state = [[CELL_UNOPEN for _ in range(MINE_COL)] for _ in range(MINE_ROW)]
+        is_mine = [[False]*MINE_COL for _ in range(MINE_ROW)]
+        near_mine_cnt = [[0]*MINE_COL for _ in range(MINE_ROW)]
+        game_over = False
+        game_win = False
+
+        mines = set()
+        while len(mines) < MINE_COUNT:
+            mines.add((random.randint(0, MINE_ROW-1), random.randint(0, MINE_COL-1)))
+        for r, c in mines:
+            is_mine[r][c] = True
+        for r in range(MINE_ROW):
+            for c in range(MINE_COL):
+                if is_mine[r][c]:
+                    continue
+                cnt = 0
+                for dr, dc in dirs:
+                    nr, nc = r+dr, c+dc
+                    if 0 <= nr < MINE_ROW and 0 <= nc < MINE_COL and is_mine[nr][nc]:
+                        cnt += 1
+                near_mine_cnt[r][c] = cnt
+
+        state_box = {"over": False, "win": False}
+
+        def mouse_callback(event, x, y, flags, param):
+            if state_box["over"] or state_box["win"]:
+                return
+            c = x // cell_size
+            r = y // cell_size
+            if not (0 <= r < MINE_ROW and 0 <= c < MINE_COL):
+                return
+            if event == cv2.EVENT_LBUTTONDOWN:
+                if board_state[r][c] == CELL_UNOPEN:
+                    if is_mine[r][c]:
+                        state_box["over"] = True
+                        board_state[r][c] = CELL_OPENED
+                    else:
+                        q = [(r, c)]
+                        board_state[r][c] = CELL_OPENED
+                        while q:
+                            rr, cc = q.pop(0)
+                            if near_mine_cnt[rr][cc] == 0:
+                                for dr, dc in dirs:
+                                    nr, nc = rr+dr, cc+dc
+                                    if 0 <= nr < MINE_ROW and 0 <= nc < MINE_COL:
+                                        if board_state[nr][nc] == CELL_UNOPEN and not is_mine[nr][nc]:
+                                            board_state[nr][nc] = CELL_OPENED
+                                            q.append((nr, nc))
+                # 胜利判定：所有非雷格都被打开
+                opened = sum(row.count(CELL_OPENED) for row in board_state)
+                if opened == MINE_ROW * MINE_COL - MINE_COUNT:
+                    state_box["win"] = True
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                if board_state[r][c] == CELL_UNOPEN:
+                    board_state[r][c] = CELL_FLAG
+                elif board_state[r][c] == CELL_FLAG:
+                    board_state[r][c] = CELL_UNOPEN
+
+        cv2.setMouseCallback(win_name, mouse_callback)
+
+        while not mine_stop_event.is_set():
+            img = np.ones((MINE_H, MINE_W, 3), dtype=np.uint8) * 200
+            for r in range(MINE_ROW):
+                for c in range(MINE_COL):
+                    x1, y1 = c*cell_size, r*cell_size
+                    x2, y2 = x1+cell_size, y1+cell_size
+                    st = board_state[r][c]
+                    cv2.rectangle(img, (x1, y1), (x2, y2), colors[st], -1)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (50, 50, 50), 1)
+                    if st == CELL_OPENED and near_mine_cnt[r][c] > 0:
+                        cv2.putText(img, str(near_mine_cnt[r][c]),
+                                    (x1+8, y1+22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                    num_color[near_mine_cnt[r][c]-1], 2)
+                    # 插旗
+                    if st == CELL_FLAG:
+                        cv2.line(img, (x1+8, y1+22), (x1+8, y1+8), (0, 0, 200), 2)
+                        cv2.putText(img, "|", (x1+6, y1+22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,200), 2)
+                    # 游戏结束：翻开所有雷
+                    if state_box["over"] and is_mine[r][c] and st != CELL_FLAG:
+                        cv2.circle(img, ((x1+x2)//2, (y1+y2)//2), 8, (0, 0, 0), -1)
+
+            # 结束/胜利文字覆盖层
+            if state_box["over"]:
+                cv2.rectangle(img, (0, MINE_H//2-30), (MINE_W, MINE_H//2+30), (0, 0, 0), -1)
+                cv2.putText(img, "GAME OVER  (r:restart  q:quit)",
+                            (30, MINE_H//2+10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            if state_box["win"]:
+                cv2.rectangle(img, (0, MINE_H//2-30), (MINE_W, MINE_H//2+30), (0, 100, 0), -1)
+                cv2.putText(img, "YOU WIN!  (r:restart  q:quit)",
+                            (60, MINE_H//2+10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+            cv2.imshow(win_name, img)
+            key = cv2.waitKey(20) & 0xFF
+            if key == ord('q'):
+                mine_stop_event.set()
+                break
+            if key == ord('r') and (state_box["over"] or state_box["win"]):
+                break  # 跳出内层循环，外层 while 重新开局
+
+    try:
+        cv2.destroyWindow(win_name)
+    except Exception:
+        pass
+    with mine_lock:
+        in_minesweeper = False
+    print("\n💣 扫雷已关闭")
+    print("> ", end="", flush=True)
+
+
+async def start_minesweeper():
+    """启动扫雷，和视频通话互斥"""
+    global in_minesweeper
+    with mine_lock:
+        if in_minesweeper:
+            print("⚠️ 扫雷已经打开")
+            return
+        if in_video:
+            print("⚠️ 正在音视频通话，无法打开扫雷！")
+            return
+        in_minesweeper = True
+        mine_stop_event.clear()
+    threading.Thread(target=minesweeper_thread, daemon=True).start()
+
+async def stop_minesweeper():
+    """关闭扫雷"""
+    global in_minesweeper
+    with mine_lock:
+        if not in_minesweeper:
+            return
+        in_minesweeper = False
+        mine_stop_event.set()
 
 def render_thread():
     """
@@ -67,7 +238,6 @@ def render_thread():
             if global_loop and global_writer:
                 asyncio.run_coroutine_threadsafe(stop_video(global_writer), global_loop)
     cv2.destroyWindow(window_name)
-
 
 def audio_play_thread():
     """
@@ -97,7 +267,6 @@ def audio_play_thread():
         time.sleep(0.01)
     stream.stop()
     stream.close()
-
 
 def audio_capture_thread(writer, loop):
     """
@@ -141,7 +310,6 @@ def audio_capture_thread(writer, loop):
         time.sleep(0.01)
     stream.stop()
     stream.close()
-
 
 async def receive_loop(reader, writer):
     """
@@ -259,7 +427,6 @@ async def receive_loop(reader, writer):
                 audio_stop_event.set()
                 in_video = False
 
-
 def video_capture_thread(writer, loop):
     """
     视频采集线程
@@ -324,7 +491,6 @@ def video_capture_thread(writer, loop):
         print("\n📹 音视频通话已结束")
         print("> ", end="", flush=True)
 
-
 async def start_video(writer, loop):
     """
     开启音视频通话
@@ -349,7 +515,6 @@ async def start_video(writer, loop):
     threading.Thread(target=audio_capture_thread, args=(writer, loop), daemon=True).start()
     threading.Thread(target=audio_play_thread, daemon=True).start()
 
-
 async def stop_video(writer):
     """
     挂断音视频通话
@@ -369,7 +534,6 @@ async def stop_video(writer):
         await writer.drain()
     except Exception:
         pass
-
 
 async def tcp_client(server_ip, port):
     """
@@ -391,6 +555,7 @@ async def tcp_client(server_ip, port):
         print("\n💬 直接输入文字发送消息")
         print("📁 输入 /send <文件路径> 发送文件")
         print("📹 输入 /call 发起【音视频】通话")
+        print("💣 输入 /mine 打开扫雷 | /exitmine 关闭扫雷")
         print("❌ 输入 /hangup 挂断 | quit 退出程序")
         print("-" * 50)
         recv_task = asyncio.create_task(receive_loop(reader, writer))
@@ -406,12 +571,22 @@ async def tcp_client(server_ip, port):
                 await send_file(writer, file_path)
                 continue
             if msg == '/call':
+                # 扫雷打开时禁止开视频
+                if in_minesweeper:
+                    print("⚠️ 正在玩扫雷，不能发起音视频通话")
+                    continue
                 writer.write(b"CALL_INVITE:me\n")
                 await writer.drain()
                 await start_video(writer, loop)
                 continue
             if msg == '/hangup':
                 await stop_video(writer)
+                continue
+            if msg == '/mine':
+                await start_minesweeper()
+                continue
+            if msg == '/exitmine':
+                await stop_minesweeper()
                 continue
             if msg.lower() == 'y' and not in_video:
                 writer.write(b"CALL_ACCEPT:me\n")
@@ -429,6 +604,8 @@ async def tcp_client(server_ip, port):
         # 退出前，如果正在通话，先挂断音视频
         if in_video:
             await stop_video(writer)
+        if in_minesweeper:
+            await stop_minesweeper()
         print("正在断开...")
         writer.close()
         await writer.wait_closed()
@@ -437,7 +614,6 @@ async def tcp_client(server_ip, port):
         print("❌ 连接失败: 服务端未启动或地址/端口错误")
     except Exception as e:
         print(f"❌ 客户端异常: {e}")
-
 
 async def send_file(writer, file_path):
     """
@@ -465,7 +641,6 @@ async def send_file(writer, file_path):
             print(f"\r📤 发送进度: {progress:.1f}%", end="", flush=True)
     await writer.drain()
     print(f"\n✅ 文件 {filename} 发送完成!")
-
 
 if __name__ == "__main__":
     # 读取命令行参数：服务端IP与端口

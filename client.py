@@ -2,16 +2,14 @@ import sys
 import os
 import json
 import asyncio
-import hashlib
 import struct
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
-    QDialog, QMessageBox, QFileDialog, QSizePolicy, QGridLayout
+    QDialog, QMessageBox, QFileDialog, QGridLayout
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
-
 
 def pack_msg(msg_type, payload):
     return struct.pack(">HIH", msg_type, len(payload), 0) + payload
@@ -19,152 +17,91 @@ def pack_msg(msg_type, payload):
 def unpack_header(h):
     return struct.unpack(">HIH", h)
 
-
-# ========== 聊天气泡 ==========
+# ========== 聊天气泡组件【修复：系统消息禁止换行】 ==========
 class MsgBubbleWidget(QWidget):
-    def __init__(self, msg_type, nickname, content):
+    def __init__(self, msg_type, nick, text):
         super().__init__()
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet("background:transparent;")
         layout = QHBoxLayout()
-        layout.setContentsMargins(6, 4, 6, 4)
-        self.setLayout(layout)
+        layout.setContentsMargins(6,4,6,4)
+        layout.setSpacing(8)
+        label = QLabel(text)
+        # 核心：系统消息关闭自动换行
+        if msg_type == "system":
+            label.setWordWrap(False)
+        else:
+            label.setWordWrap(True)
+        label.setMaximumWidth(420)
         font = QFont()
         font.setPointSize(10)
+        label.setFont(font)
 
         if msg_type == "self":
+            # 自己消息靠右
             layout.addStretch(1)
-            bw = QWidget()
-            bl = QHBoxLayout(bw)
-            bl.setContentsMargins(8, 6, 8, 6)
-            lab = QLabel(content)
-            lab.setWordWrap(True)
-            lab.setFont(font)
-            lab.setStyleSheet("background:transparent; border:none;")
-            bl.addWidget(lab)
-            bw.setStyleSheet("QWidget{background:#fff;border-radius:10px;border:1px solid #ccc;} QWidget QLabel{border:none;}")
-            layout.addWidget(bw)
-
+            label.setStyleSheet("background-color:#ffffff; border:1px solid #cccccc; border-radius:8px; padding:6px;")
+            layout.addWidget(label)
         elif msg_type == "other":
-            bw = QWidget()
-            bl = QHBoxLayout(bw)
-            bl.setContentsMargins(8, 6, 8, 6)
-            bl.setSpacing(4)
-            nick = QLabel(f"【{nickname}】:")
-            nick.setFont(font)
-            nick.setStyleSheet("background:transparent; border:none;")
-            nick.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
-            cnt = QLabel(content)
-            cnt.setWordWrap(True)
-            cnt.setFont(font)
-            cnt.setStyleSheet("background:transparent; border:none;")
-            bl.addWidget(nick)
-            bl.addWidget(cnt)
-            bw.setStyleSheet("QWidget{background:#f1f1f1;border-radius:10px;border:1px solid #ddd;} QWidget QLabel{border:none;}")
-            layout.addWidget(bw)
+            # 别人消息靠左
+            layout.addWidget(label)
+            label.setStyleSheet("background-color:#f1f1f1; border:1px solid #dddddd; border-radius:8px; padding:6px;")
             layout.addStretch(1)
-
-        elif msg_type == "system":
+        else:
+            # 系统消息居中，单行
             layout.addStretch(1)
-            lab = QLabel(content)
-            lab.setFont(font)
-            lab.setStyleSheet("color:#666; background:transparent; border:none;")
-            layout.addWidget(lab)
+            layout.addWidget(label)
             layout.addStretch(1)
-
+            label.setStyleSheet("color:#666666; background:transparent;")
+        self.setLayout(layout)
 
 # ========== 网络线程 ==========
 class TcpClientThread(QThread):
     msg_signal = pyqtSignal(str)
-    file_info_signal = pyqtSignal(dict)
-    file_finish_signal = pyqtSignal(bool, str)
     ms_signal = pyqtSignal(dict)
-    disconnected_signal = pyqtSignal()
-    connect_ok_signal = pyqtSignal()
-    connect_fail_signal = pyqtSignal(str)
-
-    def __init__(self, host, nickname):
+    connected_signal = pyqtSignal()
+    fail_signal = pyqtSignal(str)
+    disconnect_signal = pyqtSignal()
+    def __init__(self, host, port, nick):
         super().__init__()
         self.host = host
-        self.port = 8080
-        self.nickname = nickname
+        self.port = port
+        self.nick = nick
         self.reader = None
         self.writer = None
         self.loop = None
         self.running = True
-        self.recv_file = None
-        self.recv_filename = ""
-        self.recv_total = 0
-        self.recv_md5 = ""
-        self.recv_got = 0
-        self.recv_path = ""
-
-    def reset_file(self):
-        if self.recv_file:
-            self.recv_file.close()
-        self.recv_file = None
-        self.recv_filename = ""
-        self.recv_total = 0
-        self.recv_md5 = ""
-        self.recv_got = 0
-        self.recv_path = ""
 
     async def tcp_task(self):
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-            self.writer.write((self.nickname + "\n").encode())
+            self.writer.write((self.nick + "\n").encode("utf-8"))
             await self.writer.drain()
-            self.connect_ok_signal.emit()
+            self.connected_signal.emit()
             buf = b""
             while self.running:
                 chunk = await self.reader.read(4096)
                 if not chunk:
                     break
                 buf += chunk
-                while len(buf) >= 8:
-                    mt, pl, _ = unpack_header(buf[:8])
-                    total = 8 + pl
-                    if len(buf) < total:
+                while len(buf) >=8:
+                    hdr = buf[:8]
+                    mt, pl, _ = unpack_header(hdr)
+                    if len(buf) < 8+pl:
                         break
-                    pkt = buf[:total]
-                    buf = buf[total:]
-                    payload = pkt[8:]
+                    payload = buf[8:8+pl]
+                    buf = buf[8+pl:]
                     if mt == 0:
-                        self.msg_signal.emit(payload.decode("utf-8"))
-                    elif mt == 1:
-                        meta = json.loads(payload.decode("utf-8"))
-                        self.reset_file()
-                        self.recv_filename = meta["filename"]
-                        self.recv_total = meta["size"]
-                        self.recv_md5 = meta["md5"]
-                        os.makedirs(f"recv_files/{self.nickname}", exist_ok=True)
-                        self.recv_path = f"recv_files/{self.nickname}/received_{self.recv_filename}"
-                        self.recv_file = open(self.recv_path, "wb")
-                        self.file_info_signal.emit(meta)
-                    elif mt == 2:
-                        if self.recv_file is None:
-                            continue
-                        self.recv_file.write(payload)
-                        self.recv_got += len(payload)
-                        if self.recv_got >= self.recv_total:
-                            self.recv_file.close()
-                            self.recv_file = None
-                            h = hashlib.md5()
-                            with open(self.recv_path, "rb") as f:
-                                h.update(f.read())
-                            ok = h.hexdigest() == self.recv_md5
-                            self.file_finish_signal.emit(ok, self.recv_path)
-                            self.reset_file()
-                    elif mt == 4:
+                        text = payload.decode("utf-8").strip()
+                        self.msg_signal.emit(text)
+                    elif mt ==4:
                         try:
-                            self.ms_signal.emit(json.loads(payload.decode("utf-8")))
-                        except Exception:
-                            pass
+                            data = json.loads(payload.decode("utf-8"))
+                            self.ms_signal.emit(data)
+                        except:
+                            continue
         except Exception as e:
-            self.connect_fail_signal.emit(str(e))
+            self.fail_signal.emit(str(e))
         finally:
-            self.reset_file()
-            self.disconnected_signal.emit()
+            self.disconnect_signal.emit()
 
     def run(self):
         self.loop = asyncio.new_event_loop()
@@ -172,470 +109,292 @@ class TcpClientThread(QThread):
         self.loop.run_until_complete(self.tcp_task())
 
     async def _send_raw(self, data):
-        self.writer.write(data)
-        await self.writer.drain()
+        if self.writer:
+            self.writer.write(data)
+            await self.writer.drain()
 
     def send_text(self, text):
-        if self.writer:
-            pkt = pack_msg(0, f"{self.nickname}|{text}".encode("utf-8"))
-            asyncio.run_coroutine_threadsafe(self._send_raw(pkt), self.loop)
+        pkt = pack_msg(0, text.encode("utf-8"))
+        asyncio.run_coroutine_threadsafe(self._send_raw(pkt), self.loop)
 
-    def send_file(self, path):
-        if not self.writer or not os.path.exists(path):
-            return
-        fname = os.path.basename(path)
-        size = os.path.getsize(path)
-        h = hashlib.md5()
-        with open(path, "rb") as f:
-            while c := f.read(4096):
-                h.update(c)
-        meta = {"filename": fname, "size": size, "md5": h.hexdigest()}
-        mp = pack_msg(1, json.dumps(meta).encode("utf-8"))
-        asyncio.run_coroutine_threadsafe(self._send_file(mp, path), self.loop)
-
-    async def _send_file(self, mp, path):
-        await self._send_raw(mp)
-        with open(path, "rb") as f:
-            while chunk := f.read(4096):
-                await self._send_raw(pack_msg(2, chunk))
-
-    def send_ms(self, cmd_dict):
-        if self.writer:
-            pkt = pack_msg(4, json.dumps(cmd_dict).encode("utf-8"))
-            asyncio.run_coroutine_threadsafe(self._send_raw(pkt), self.loop)
+    def send_ms_cmd(self, cmd_dict):
+        payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
+        pkt = pack_msg(4, payload)
+        asyncio.run_coroutine_threadsafe(self._send_raw(pkt), self.loop)
 
     def close_conn(self):
         self.running = False
         if self.writer:
             asyncio.run_coroutine_threadsafe(self.writer.close(), self.loop)
 
-
-# ========== 扫雷格子按钮 ==========
-class CellButton(QPushButton):
-    left_clicked = pyqtSignal(int, int)
-    right_clicked = pyqtSignal(int, int)
-
-    def __init__(self, x, y):
-        super().__init__("")
-        self.x = x
-        self.y = y
-        self.setFixedSize(32, 32)
-        self.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        self.setStyleSheet("QPushButton{background:#cfcfcf; border:1px solid #999;}")
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.RightButton:
-            self.right_clicked.emit(self.x, self.y)
-        else:
-            super().mousePressEvent(e)
-            self.left_clicked.emit(self.x, self.y)
-
-
-# ========== 扫雷等待窗口（发起人） ==========
-class MSWaitingDialog(QDialog):
-    def __init__(self, parent, inviter, tcp_client):
+# ========== 扫雷窗口 ==========
+class MinesweeperWindow(QDialog):
+    def __init__(self, parent, tcp, my_nick):
         super().__init__(parent)
-        self.setWindowTitle("Waiting for players...")
-        self.setFixedSize(320, 260)
-        self.tcp = tcp_client
-        lay = QVBoxLayout(self)
-        self.info = QLabel(f"Inviter: {inviter}\nMax 6 players, min 2.")
-        self.player_list = QListWidget()
-        self.count_label = QLabel("Players: 1/6")
-        self.timer_label = QLabel("Countdown: 15s")
-        cancel_btn = QPushButton("Cancel Invite")
-        cancel_btn.clicked.connect(self.on_cancel)
-        lay.addWidget(self.info)
-        lay.addWidget(self.player_list)
-        lay.addWidget(self.count_label)
-        lay.addWidget(self.timer_label)
-        lay.addWidget(cancel_btn)
-
-        self.remain = 15
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.tick)
-        self.timer.start(1000)
-
-    def tick(self):
-        self.remain -= 1
-        self.timer_label.setText(f"Countdown: {self.remain}s")
-        if self.remain <= 0:
-            self.timer.stop()
-
-    def update_players(self, players):
-        self.player_list.clear()
-        for p in players:
-            self.player_list.addItem(p)
-        self.count_label.setText(f"Players: {len(players)}/6")
-
-    def on_cancel(self):
-        self.tcp.send_ms({"cmd": "cancel"})
-        self.close()
-
-
-# ========== 扫雷邀请弹窗（被邀请人） ==========
-class MSInviteDialog(QDialog):
-    def __init__(self, parent, inviter, tcp_client):
-        super().__init__(parent)
-        self.setWindowTitle("Game Invite")
-        self.setFixedSize(280, 160)
-        self.tcp = tcp_client
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"{inviter} invites you to Minesweeper!"))
-        self.timer_label = QLabel("15s to join")
-        lay.addWidget(self.timer_label)
-        btn_lay = QHBoxLayout()
-        join_btn = QPushButton("Join Game")
-        decl_btn = QPushButton("Decline")
-        join_btn.clicked.connect(self.on_join)
-        decl_btn.clicked.connect(self.on_decline)
-        btn_lay.addWidget(join_btn)
-        btn_lay.addWidget(decl_btn)
-        lay.addLayout(btn_lay)
-
-        self.remain = 15
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.tick)
-        self.timer.start(1000)
-
-    def tick(self):
-        self.remain -= 1
-        self.timer_label.setText(f"{self.remain}s to join")
-        if self.remain <= 0:
-            self.timer.stop()
-            self.reject()
-
-    def on_join(self):
-        self.tcp.send_ms({"cmd": "accept"})
-        self.accept()
-
-    def on_decline(self):
-        self.tcp.send_ms({"cmd": "reject"})
-        self.reject()
-
-
-# ========== 扫雷游戏窗口 ==========
-class MSGameWindow(QDialog):
-    def __init__(self, parent, my_nick, rows, cols, tcp_client):
-        super().__init__(parent)
-        self.setWindowTitle("Minesweeper Online")
+        self.setWindowTitle("Minesweeper")
+        self.tcp = tcp
         self.my_nick = my_nick
-        self.rows = rows
-        self.cols = cols
-        self.tcp = tcp_client
-        self.current_player = None
+        self.rows = 16
+        self.cols =16
         self.buttons = {}
-        self.setMinimumSize(720, 600)
+        self.current_player = None
+        self.players = []
+        self.init_ui()
 
-        root = QHBoxLayout(self)
-        left = QVBoxLayout()
-        left.addWidget(QLabel("Players:"))
+    def init_ui(self):
+        main_layout = QHBoxLayout()
+        left_layout = QVBoxLayout()
         self.player_list = QListWidget()
-        left.addWidget(self.player_list)
-        self.status = QLabel("")
-        left.addWidget(self.status)
-        root.addLayout(left)
+        self.status_label = QLabel("Waiting game...")
+        left_layout.addWidget(QLabel("Players:"))
+        left_layout.addWidget(self.player_list)
+        left_layout.addWidget(self.status_label)
+        right_layout = QVBoxLayout()
+        grid_widget = QWidget()
+        self.grid_layout = QGridLayout(grid_widget)
+        self.grid_layout.setSpacing(2)
+        right_layout.addWidget(grid_widget)
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(right_layout,4)
+        self.setLayout(main_layout)
+        self.setMinimumSize(750,620)
 
-        right = QVBoxLayout()
-        grid_holder = QWidget()
-        self.grid = QGridLayout(grid_holder)
-        self.grid.setSpacing(2)
-        right.addWidget(grid_holder)
-        root.addLayout(right)
-
-        for x in range(rows):
-            for y in range(cols):
-                b = CellButton(x, y)
-                b.left_clicked.connect(self.on_left)
-                b.right_clicked.connect(self.on_right)
-                self.grid.addWidget(b, x, y)
-                self.buttons[(x, y)] = b
-
-    def is_my_turn(self):
-        return self.current_player == self.my_nick
-
-    def on_left(self, x, y):
-        if not self.is_my_turn():
-            return
-        self.tcp.send_ms({"cmd": "click", "x": x, "y": y, "action": "open"})
-
-    def on_right(self, x, y):
-        if not self.is_my_turn():
-            return
-        self.tcp.send_ms({"cmd": "click", "x": x, "y": y, "action": "flag"})
-
-    def update_players(self, players):
-        self.player_list.clear()
-        for p in players:
-            text = p + ("  << YOUR TURN" if p == self.current_player else "")
-            item = QListWidgetItem(text)
-            if p == self.current_player:
-                item.setForeground(Qt.GlobalColor.red)
-            if p == self.my_nick:
-                item.setFont(QFont("", 10, QFont.Weight.Bold))
-            self.player_list.addItem(item)
-        if self.is_my_turn():
-            self.status.setText("YOUR TURN - click to open, right-click to flag")
-            self.status.setStyleSheet("color:red;")
-        else:
-            self.status.setText(f"Waiting for {self.current_player}...")
-            self.status.setStyleSheet("color:#666;")
-
-    def update_board(self, cells, current, players):
-        self.current_player = current
+    def build_grid(self):
+        for b in self.buttons.values():
+            b.deleteLater()
+        self.buttons.clear()
         for x in range(self.rows):
             for y in range(self.cols):
-                v = cells[x][y]
-                b = self.buttons[(x, y)]
-                if v == "c":
-                    b.setText("")
-                    b.setEnabled(True)
-                    b.setStyleSheet("QPushButton{background:#cfcfcf; border:1px solid #999;}")
-                elif v == "f":
-                    b.setText("F")
-                    b.setStyleSheet("QPushButton{background:#ffd5d5; border:1px solid #999; color:red;}")
+                btn = QPushButton("")
+                btn.setFixedSize(32,32)
+                btn.setFont(QFont("Arial",12,QFont.Weight.Bold))
+                btn.clicked.connect(lambda checked,xx=x,yy=y: self.on_click(xx,yy,"open"))
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(lambda pos,xx=x,yy=y: self.on_click(xx,yy,"flag"))
+                self.grid_layout.addWidget(btn,x,y)
+                self.buttons[(x,y)] = btn
+
+    def on_click(self,x,y,action):
+        self.tcp.send_ms_cmd({"cmd":"click","x":x,"y":y,"action":action})
+
+    def update_board(self,cells,current,players):
+        self.current_player = current
+        self.players = players
+        self.player_list.clear()
+        for p in players:
+            item = QListWidgetItem(p + (" << YOUR TURN" if p == current else ""))
+            if p == current:
+                item.setForeground(Qt.GlobalColor.red)
+            self.player_list.addItem(item)
+        if current == self.my_nick:
+            self.status_label.setText("YOUR TURN, click to open / right click flag")
+            self.status_label.setStyleSheet("color:red;")
+        else:
+            self.status_label.setText(f"Waiting for {current}")
+            self.status_label.setStyleSheet("color:#333;")
+        for x in range(self.rows):
+            for y in range(self.cols):
+                val = cells[x][y]
+                btn = self.buttons[(x,y)]
+                if val == "c":
+                    btn.setText("")
+                    btn.setStyleSheet("background:#cfcfcf; border:1px solid #999;")
+                    btn.setEnabled(True)
+                elif val == "f":
+                    btn.setText("F")
+                    btn.setStyleSheet("background:#ffdddd; color:red; border:1px solid #999;")
+                    btn.setEnabled(True)
                 else:
-                    b.setText(v)
-                    b.setEnabled(False)
-                    b.setStyleSheet("QPushButton{background:#fff; border:1px solid #bbb; color:#333;}")
-        self.update_players(players)
+                    btn.setText(val)
+                    btn.setStyleSheet("background:#ffffff; border:1px solid #bbb;")
+                    btn.setEnabled(False)
 
-    def reveal_mines(self, mines, loser):
-        for x, y in mines:
-            b = self.buttons.get((x, y))
-            if b:
-                b.setText("*")
-                b.setEnabled(False)
-                b.setStyleSheet("QPushButton{background:#ff6666; border:1px solid #999; color:#fff;}")
-        QMessageBox.information(self, "Game Over", f"{loser} hit a mine!")
-
-
-# ========== 视频邀请弹窗（保留占位） ==========
+# ========== 视频通话浮窗（无边框+透明度，靠右屏幕右侧） ==========
 class VideoInvitePopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowOpacity(0.75)
-        self.setFixedSize(280, 140)
-        s = QApplication.primaryScreen().geometry()
-        self.move(s.width() - 300, 120)
-        lay = QVBoxLayout(self)
+        self.setFixedSize(280,140)
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.width()-300,120)
+        lay = QVBoxLayout()
         lay.addWidget(QLabel("Incoming Video Call Invite"))
-        bl = QHBoxLayout()
-        a = QPushButton("Accept")
-        r = QPushButton("Reject")
-        a.clicked.connect(self.accept)
-        r.clicked.connect(self.reject)
-        bl.addWidget(a)
-        bl.addWidget(r)
-        lay.addLayout(bl)
+        hlay = QHBoxLayout()
+        btn_acc = QPushButton("Accept")
+        btn_rej = QPushButton("Reject")
+        btn_acc.clicked.connect(self.accept)
+        btn_rej.clicked.connect(self.reject)
+        hlay.addWidget(btn_acc)
+        hlay.addWidget(btn_rej)
+        lay.addLayout(hlay)
+        self.setLayout(lay)
 
-
-# ========== 登录窗口 ==========
+# ========== 登录弹窗 ==========
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.setFixedSize(320, 160)
-        lay = QVBoxLayout(self)
+        self.setFixedSize(320,160)
+        lay = QVBoxLayout()
         lay.addWidget(QLabel("Server IP"))
         self.ip_edit = QLineEdit("127.0.0.1")
         lay.addWidget(self.ip_edit)
         lay.addWidget(QLabel("Nickname"))
         self.nick_edit = QLineEdit()
         lay.addWidget(self.nick_edit)
-        self.status = QLabel("")
-        lay.addWidget(self.status)
-        self.ok = QPushButton("Connect")
-        self.ok.clicked.connect(self.on_ok)
-        lay.addWidget(self.ok)
+        self.status_label = QLabel("")
+        lay.addWidget(self.status_label)
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.clicked.connect(self.on_connect)
+        lay.addWidget(self.connect_btn)
+        self.setLayout(lay)
         self.nickname = None
         self.host = None
-        self.tcp = None
+        self.tcp_thread = None
 
-    def on_ok(self):
+    def on_connect(self):
         ip = self.ip_edit.text().strip()
         nick = self.nick_edit.text().strip()
         if not ip or not nick:
             QMessageBox.warning(self, "Warning", "IP and nickname cannot be empty!")
             return
-        self.status.setText("Connecting...")
-        self.ok.setEnabled(False)
-        self.tcp = TcpClientThread(ip, nick)
-        self.tcp.connect_ok_signal.connect(self.on_ok_conn)
-        self.tcp.connect_fail_signal.connect(self.on_fail_conn)
-        self.tcp.start()
+        self.status_label.setText("Connecting...")
+        self.connect_btn.setEnabled(False)
+        self.tcp_thread = TcpClientThread(ip, 8080, nick)
+        self.tcp_thread.connected_signal.connect(self.on_connected)
+        self.tcp_thread.fail_signal.connect(self.on_fail)
+        self.tcp_thread.start()
 
-    def on_ok_conn(self):
+    def on_connected(self):
         self.nickname = self.nick_edit.text().strip()
         self.host = self.ip_edit.text().strip()
         self.accept()
 
-    def on_fail_conn(self, err):
-        self.status.setText("Connect failed!")
-        QMessageBox.critical(self, "Error", err)
-        self.tcp.quit()
-        self.tcp.wait()
-        self.tcp = None
-        self.ok.setEnabled(True)
-
+    def on_fail(self, err):
+        self.status_label.setText("Connect failed!")
+        QMessageBox.critical(self,"Error",f"Connection error: {err}")
+        self.connect_btn.setEnabled(True)
 
 # ========== 主聊天窗口 ==========
 class ChatMainWindow(QMainWindow):
-    def __init__(self, host, nickname, tcp):
+    def __init__(self, host, nick, tcp):
         super().__init__()
-        self.setWindowTitle(f"ChatRoom - {nickname}")
-        self.setGeometry(100, 100, 680, 520)
-        self.nickname = nickname
+        self.setWindowTitle(f"ChatRoom - {nick}")
+        self.setGeometry(100,100,680,520)
+        self.nick = nick
         self.tcp = tcp
-        self.ms_wait_dlg = None
-        self.ms_game_win = None
-
+        self.ms_window = None
         central = QWidget()
         self.setCentralWidget(central)
         vl = QVBoxLayout(central)
-
         self.msg_list = QListWidget()
         self.msg_list.setSpacing(4)
-        self.msg_list.setStyleSheet("""
-        QListWidget{background:transparent; border:none;}
-        QListWidget::item{border:none; background:transparent;}
-        QListWidget::item:selected{background:transparent;}
-        QListWidget::item:hover{background:transparent;}
-        """)
+        self.msg_list.setStyleSheet("QListWidget{background:transparent;border:none;}")
         vl.addWidget(self.msg_list)
-
-        bl = QHBoxLayout()
+        btn_layout = QHBoxLayout()
         self.btn_file = QPushButton("Send File")
-        self.btn_file.clicked.connect(self.select_file)
-        self.btn_video = QPushButton("Start Video Call")
-        self.btn_video.clicked.connect(lambda: VideoInvitePopup(self).exec())
+        self.btn_vid = QPushButton("Start Video Call")
         self.btn_ms = QPushButton("Minesweeper")
-        self.btn_ms.clicked.connect(self.invite_ms)
-        bl.addWidget(self.btn_file)
-        bl.addWidget(self.btn_video)
-        bl.addWidget(self.btn_ms)
-        vl.addLayout(bl)
+        btn_layout.addWidget(self.btn_file)
+        btn_layout.addWidget(self.btn_vid)
+        btn_layout.addWidget(self.btn_ms)
+        vl.addLayout(btn_layout)
+        input_layout = QHBoxLayout()
+        self.msg_input = QLineEdit()
+        self.msg_input.setPlaceholderText("Input message...")
+        self.btn_send = QPushButton("Send")
+        input_layout.addWidget(self.msg_input)
+        input_layout.addWidget(self.btn_send)
+        vl.addLayout(input_layout)
+        # 信号绑定
+        self.tcp.msg_signal.connect(self.on_recv_msg)
+        self.tcp.ms_signal.connect(self.on_ms_event)
+        self.tcp.disconnect_signal.connect(self.on_disconnect)
+        self.btn_send.clicked.connect(self.send_message)
+        self.msg_input.returnPressed.connect(self.send_message)
+        self.btn_ms.clicked.connect(self.invite_minesweeper)
+        self.btn_vid.clicked.connect(self.video_invite)
+        self.btn_file.clicked.connect(self.send_file)
 
-        il = QHBoxLayout()
-        self.input = QLineEdit()
-        self.input.setPlaceholderText("Input message...")
-        send = QPushButton("Send")
-        send.clicked.connect(self.send_msg)
-        il.addWidget(self.input)
-        il.addWidget(send)
-        vl.addLayout(il)
-
-        tcp.msg_signal.connect(self.on_recv_msg)
-        tcp.file_info_signal.connect(self.on_file_info)
-        tcp.file_finish_signal.connect(self.on_file_finish)
-        tcp.ms_signal.connect(self.on_ms_msg)
-        tcp.disconnected_signal.connect(self.on_disconnect)
-
-    def add_bubble(self, w):
+    def add_bubble(self, widget):
         item = QListWidgetItem()
-        item.setSizeHint(w.sizeHint())
+        item.setSizeHint(widget.sizeHint())
         self.msg_list.addItem(item)
-        self.msg_list.setItemWidget(item, w)
+        self.msg_list.setItemWidget(item, widget)
         self.msg_list.scrollToBottom()
 
+    def send_message(self):
+        txt = self.msg_input.text().strip()
+        if not txt:
+            return
+        # 本地直接渲染自己消息（右侧气泡），服务端不会回发这条消息给自己
+        self.add_bubble(MsgBubbleWidget("self", self.nick, txt))
+        self.tcp.send_text(txt)
+        self.msg_input.clear()
+
     def on_recv_msg(self, txt):
+        # 只渲染别人消息和系统上下线提示
         if "joined" in txt or "left" in txt:
             self.add_bubble(MsgBubbleWidget("system", "", txt))
-        elif "|" in txt:
-            nick, content = txt.split("|", 1)
-            self.add_bubble(MsgBubbleWidget("other", nick, content))
         else:
-            self.add_bubble(MsgBubbleWidget("system", "", txt))
+            self.add_bubble(MsgBubbleWidget("other", "", txt))
 
-    def on_file_info(self, meta):
-        self.add_bubble(MsgBubbleWidget("system", "", f"Receiving: {meta['filename']} ({meta['size']}B)"))
+    def invite_minesweeper(self):
+        self.tcp.send_ms_cmd({"cmd":"invite"})
 
-    def on_file_finish(self, ok, path):
-        if ok:
-            self.add_bubble(MsgBubbleWidget("system", "", f"Saved: {path}"))
-        else:
-            self.add_bubble(MsgBubbleWidget("system", "", "File corrupted (MD5 mismatch)"))
-
-    def send_msg(self):
-        t = self.input.text().strip()
-        if not t:
-            return
-        self.add_bubble(MsgBubbleWidget("self", self.nickname, t))
-        self.tcp.send_text(t)
-        self.input.clear()
-
-    def select_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select File")
-        if path:
-            self.tcp.send_file(path)
-            self.add_bubble(MsgBubbleWidget("self", self.nickname, f"Sending: {os.path.basename(path)}"))
-
-    # ---------- 扫雷 ----------
-    def invite_ms(self):
-        self.tcp.send_ms({"cmd": "invite"})
-        self.ms_wait_dlg = MSWaitingDialog(self, self.nickname, self.tcp)
-        self.ms_wait_dlg.show()
-
-    def on_ms_msg(self, d):
+    def on_ms_event(self, d):
         cmd = d.get("cmd")
         if cmd == "invite":
-            inviter = d["inviter"]
-            if inviter == self.nickname:
-                return
-            dlg = MSInviteDialog(self, inviter, self.tcp)
-            dlg.exec()
-        elif cmd == "busy":
-            QMessageBox.information(self, "Minesweeper", "A game is already in progress.")
-        elif cmd == "full":
-            QMessageBox.information(self, "Minesweeper", "Game lobby is full.")
-        elif cmd == "join":
-            if self.ms_wait_dlg:
-                self.ms_wait_dlg.update_players(d["players"])
-        elif cmd == "leave_wait":
-            if self.ms_wait_dlg:
-                self.ms_wait_dlg.update_players(d["players"])
-        elif cmd == "cancel":
-            if self.ms_wait_dlg:
-                self.ms_wait_dlg.close()
-                self.ms_wait_dlg = None
-            QMessageBox.information(self, "Minesweeper", d.get("msg", "Game cancelled"))
+            ret = QMessageBox.question(self,"Minesweeper Invite",f"{d['inviter']} invite you to minesweeper, accept?",QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                self.tcp.send_ms_cmd({"cmd":"accept"})
         elif cmd == "start":
-            if self.ms_wait_dlg:
-                self.ms_wait_dlg.close()
-                self.ms_wait_dlg = None
-            self.ms_game_win = MSGameWindow(self, self.nickname, d["rows"], d["cols"], self.tcp)
-            self.ms_game_win.update_players(d["players"])
-            self.ms_game_win.current_player = d["current"]
-            self.ms_game_win.show()
+            self.ms_window = MinesweeperWindow(self, self.tcp, self.nick)
+            self.ms_window.build_grid()
+            self.ms_window.show()
         elif cmd == "update":
-            if self.ms_game_win:
-                self.ms_game_win.update_board(d["cells"], d["current"], d["players"])
+            if self.ms_window:
+                self.ms_window.update_board(d["cells"],d["current"],d["players"])
         elif cmd == "gameover":
-            if self.ms_game_win:
-                self.ms_game_win.reveal_mines(d["mines"], d["loser"])
+            QMessageBox.information(self,"Game Over",f"{d['loser']} stepped on mine!")
+            if self.ms_window:
+                self.ms_window.close()
+                self.ms_window = None
         elif cmd == "win":
-            if self.ms_game_win:
-                QMessageBox.information(self, "Minesweeper", "You win! All safe cells opened.")
+            QMessageBox.information(self,"Win","All mines cleared!")
+            if self.ms_window:
+                self.ms_window.close()
+                self.ms_window = None
+        elif cmd == "cancel":
+            QMessageBox.information(self,"Game cancelled",d.get("msg","Game cancelled"))
         elif cmd == "abort":
-            if self.ms_game_win:
-                self.ms_game_win.close()
-                self.ms_game_win = None
-            QMessageBox.information(self, "Minesweeper", d.get("msg", "Game aborted"))
+            QMessageBox.information(self,"Game aborted",d.get("msg","Game aborted"))
+        elif cmd == "busy":
+            QMessageBox.warning(self,"Warning","Minesweeper room busy!")
+        elif cmd == "full":
+            QMessageBox.warning(self,"Warning","Room full")
+
+    def video_invite(self):
+        dlg = VideoInvitePopup(self)
+        dlg.exec()
+
+    def send_file(self):
+        path,_ = QFileDialog.getOpenFileName(self,"Select file")
+        if path:
+            QMessageBox.information(self,"Tip","File transfer function not implemented yet")
 
     def on_disconnect(self):
-        self.add_bubble(MsgBubbleWidget("system", "", "Disconnected from server"))
+        self.add_bubble(MsgBubbleWidget("system","","Disconnected from server"))
 
-    def closeEvent(self, e):
+    def closeEvent(self, event):
         self.tcp.close_conn()
-        self.tcp.wait()
-        e.accept()
-
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     login = LoginDialog()
     if login.exec():
-        win = ChatMainWindow(login.host, login.nickname, login.tcp)
-        win.show()
+        w = ChatMainWindow(login.host, login.nickname, login.tcp_thread)
+        w.show()
         sys.exit(app.exec())

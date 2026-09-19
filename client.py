@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont
 
-
 class MsgBubbleWidget(QWidget):
     """单个气泡控件，区分 自己(右白色) / 他人(左浅灰) / 系统提示(居中灰色)"""
     def __init__(self, msg_type, nickname, content):
@@ -16,49 +15,68 @@ class MsgBubbleWidget(QWidget):
         layout.setContentsMargins(6,4,6,4)
         self.setLayout(layout)
 
-        label = QLabel()
-        label.setWordWrap(True)
-        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-
         font = QFont()
         font.setPointSize(10)
-        label.setFont(font)
 
         if msg_type == "self":
-            # 自己消息：靠右，白色气泡
+            # 自己消息：靠右，白色气泡，去掉昵称后缀
             layout.addStretch(1)
-            label.setText(f"{content} 【{nickname}】")
+            label = QLabel()
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+            label.setFont(font)
+            label.setText(f"{content}")
             label.setStyleSheet("""
                 QLabel{
                     background-color:#ffffff;
                     border:1px solid #cccccc;
                     border-radius:10px;
                     padding:7px 10px;
-                    max-width:400px;
                 }
             """)
             layout.addWidget(label)
+
         elif msg_type == "other":
-            # 别人消息：靠左，浅灰气泡
-            label.setText(f"【{nickname}】: {content}")
-            label.setStyleSheet("""
-                QLabel{
+            # 别人消息：昵称单独label，正文单独label，实现换行缩进对齐
+            bubble_layout = QHBoxLayout()
+            bubble_layout.setContentsMargins(7,7,7,7)
+            bubble_layout.setSpacing(4)
+
+            nick_label = QLabel(f"【{nickname}】:")
+            nick_label.setFont(font)
+            nick_label.setStyleSheet("background:transparent;")
+            nick_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+
+            content_label = QLabel(content)
+            content_label.setFont(font)
+            content_label.setWordWrap(True)
+            content_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+            content_label.setStyleSheet("background:transparent;")
+
+            bubble_layout.addWidget(nick_label)
+            bubble_layout.addWidget(content_label)
+
+            bubble_widget = QWidget()
+            bubble_widget.setLayout(bubble_layout)
+            bubble_widget.setStyleSheet("""
+                QWidget{
                     background-color:#f1f1f1;
                     border:1px solid #dddddd;
                     border-radius:10px;
-                    padding:7px 10px;
-                    max-width:400px;
                 }
             """)
-            layout.addWidget(label)
+
+            layout.addWidget(bubble_widget)
             layout.addStretch(1)
+
         elif msg_type == "system":
-            # 系统上下线提示，居中无气泡，取消max-width，防止提前换行
+            # 系统上下线提示，居中无气泡，禁止自动换行
             layout.addStretch(1)
+            label = QLabel()
+            label.setWordWrap(False)
+            label.setFont(font)
             label.setText(content)
             label.setStyleSheet("color:#666666; background:transparent;")
-            # 关键：关闭自动换行，长系统信息完整一行展示
-            label.setWordWrap(False)
             layout.addWidget(label)
             layout.addStretch(1)
 

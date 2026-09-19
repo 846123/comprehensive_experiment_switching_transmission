@@ -1,18 +1,27 @@
 import sys
 import asyncio
 import os
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
-                             QDialog, QMessageBox, QFileDialog, QSizePolicy)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
+    QDialog, QMessageBox, QFileDialog, QSizePolicy
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
+
 
 class MsgBubbleWidget(QWidget):
     """单个气泡控件，区分 自己(右白色) / 他人(左浅灰) / 系统提示(居中灰色)"""
+
     def __init__(self, msg_type, nickname, content):
         super().__init__()
+
+        # 消除控件自身默认灰色背景
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background:transparent;")
+
         layout = QHBoxLayout()
-        layout.setContentsMargins(6,4,6,4)
+        layout.setContentsMargins(6, 4, 6, 4)
         self.setLayout(layout)
 
         font = QFont()
@@ -21,62 +30,77 @@ class MsgBubbleWidget(QWidget):
         if msg_type == "self":
             # 自己消息：靠右，白色气泡，去掉昵称后缀
             layout.addStretch(1)
-            label = QLabel()
+
+            bubble_widget = QWidget()
+            bubble_layout = QHBoxLayout()
+            bubble_layout.setContentsMargins(8, 6, 8, 6)
+            bubble_layout.setSpacing(0)
+            bubble_widget.setLayout(bubble_layout)
+
+            label = QLabel(content)
             label.setWordWrap(True)
-            label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             label.setFont(font)
-            label.setText(f"{content}")
-            label.setStyleSheet("""
-                QLabel{
+            label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+            label.setStyleSheet("background:transparent; border:none;")
+
+            bubble_layout.addWidget(label)
+            bubble_widget.setStyleSheet("""
+                QWidget{
                     background-color:#ffffff;
-                    border:1px solid #cccccc;
                     border-radius:10px;
-                    padding:7px 10px;
+                    border:1px solid #cccccc;
+                }
+                QWidget QLabel{
+                    border:none;
                 }
             """)
-            layout.addWidget(label)
+
+            layout.addWidget(bubble_widget)
 
         elif msg_type == "other":
-            # 别人消息：昵称+正文在同一个气泡内，单层边框，换行缩进对齐
+            # 别人消息：靠左，浅灰气泡，昵称单独label，正文单独label，换行缩进对齐
+            bubble_widget = QWidget()
             bubble_layout = QHBoxLayout()
-            bubble_layout.setContentsMargins(7,7,7,7)
+            bubble_layout.setContentsMargins(8, 6, 8, 6)
             bubble_layout.setSpacing(4)
+            bubble_widget.setLayout(bubble_layout)
 
             nick_label = QLabel(f"【{nickname}】:")
             nick_label.setFont(font)
-            nick_label.setStyleSheet("background:transparent;")
+            nick_label.setStyleSheet("background:transparent; border:none;")
             nick_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
 
             content_label = QLabel(content)
             content_label.setFont(font)
             content_label.setWordWrap(True)
             content_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-            content_label.setStyleSheet("background:transparent;")
+            content_label.setStyleSheet("background:transparent; border:none;")
 
             bubble_layout.addWidget(nick_label)
             bubble_layout.addWidget(content_label)
 
-            bubble_widget = QWidget()
-            bubble_widget.setLayout(bubble_layout)
-            # 【修改重点】仅保留背景色，删除外层边框，统一视觉
             bubble_widget.setStyleSheet("""
                 QWidget{
                     background-color:#f1f1f1;
                     border-radius:10px;
                     border:1px solid #dddddd;
                 }
+                QWidget QLabel{
+                    border:none;
+                }
             """)
+
             layout.addWidget(bubble_widget)
             layout.addStretch(1)
 
         elif msg_type == "system":
-            # 系统上下线提示，居中无气泡，禁止自动换行
+            # 系统上下线提示，居中无气泡
             layout.addStretch(1)
             label = QLabel()
             label.setWordWrap(False)
             label.setFont(font)
             label.setText(content)
-            label.setStyleSheet("color:#666666; background:transparent;")
+            label.setStyleSheet("color:#666666; background:transparent; border:none;")
             layout.addWidget(label)
             layout.addStretch(1)
 
@@ -181,7 +205,7 @@ class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.setFixedSize(320,160)
+        self.setFixedSize(320, 160)
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Server IP"))
         self.ip_edit = QLineEdit("127.0.0.1")
@@ -202,7 +226,6 @@ class LoginDialog(QDialog):
     def on_ok(self):
         ip = self.ip_edit.text().strip()
         nick = self.nick_edit.text().strip()
-        # 校验：不允许空昵称、空IP
         if not ip or not nick:
             QMessageBox.warning(self, "Warning", "IP and nickname cannot be empty!")
             self.ip_edit.clear()
@@ -235,7 +258,7 @@ class ChatMainWindow(QMainWindow):
     def __init__(self, host, nickname, tcp_client):
         super().__init__()
         self.setWindowTitle(f"ChatRoom - {nickname}")
-        self.setGeometry(100,100,650,480)
+        self.setGeometry(100, 100, 650, 480)
         self.nickname = nickname
         self.tcp_client = tcp_client
 
@@ -243,12 +266,26 @@ class ChatMainWindow(QMainWindow):
         self.setCentralWidget(central)
         vl = QVBoxLayout(central)
 
-        # QListWidget 作为聊天容器，不再用QTextEdit
         self.msg_list = QListWidget()
-        self.msg_list.setSpacing(2)
+        self.msg_list.setSpacing(4)
+        self.msg_list.setStyleSheet("""
+        QListWidget {
+            background:transparent;
+            border:none;
+        }
+        QListWidget::item {
+            border:none;
+            background:transparent;
+        }
+        QListWidget::item:selected {
+            background:transparent;
+        }
+        QListWidget::item:hover {
+            background:transparent;
+        }
+        """)
         vl.addWidget(self.msg_list)
 
-        # 底部按钮栏
         btn_layout = QHBoxLayout()
         self.btn_file = QPushButton("Send File")
         self.btn_file.clicked.connect(self.select_file)
@@ -260,7 +297,6 @@ class ChatMainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_mines)
         vl.addLayout(btn_layout)
 
-        # 输入框+发送
         input_layout = QHBoxLayout()
         self.msg_input = QLineEdit()
         self.msg_input.setPlaceholderText("Input message...")
@@ -270,13 +306,11 @@ class ChatMainWindow(QMainWindow):
         input_layout.addWidget(self.btn_send)
         vl.addLayout(input_layout)
 
-        # 绑定网络信号
         self.tcp_client.msg_signal.connect(self.on_recv_msg)
         self.tcp_client.file_signal.connect(self.on_file_recv)
         self.tcp_client.disconnected_signal.connect(self.on_disconnect)
 
     def add_msg_item(self, bubble_widget):
-        """添加一条消息到列表，自动滚动到底部"""
         item = QListWidgetItem()
         item.setSizeHint(bubble_widget.sizeHint())
         self.msg_list.addItem(item)
@@ -284,9 +318,7 @@ class ChatMainWindow(QMainWindow):
         self.msg_list.scrollToBottom()
 
     def on_recv_msg(self, txt):
-        """处理收到的网络消息"""
-        if "joined the chatroom" in txt or "用户离开" in txt:
-            # 系统提示
+        if "joined the chatroom" in txt or "User left" in txt:
             w = MsgBubbleWidget("system", "", txt)
             self.add_msg_item(w)
         elif "|" in txt:
@@ -301,10 +333,8 @@ class ChatMainWindow(QMainWindow):
         text = self.msg_input.text().strip()
         if not text:
             return
-        # 【核心约定】本地直接渲染自己的消息，不等待服务器返回
         w = MsgBubbleWidget("self", self.nickname, text)
         self.add_msg_item(w)
-        # 发送到服务端
         self.tcp_client.send_text(text)
         self.msg_input.clear()
 

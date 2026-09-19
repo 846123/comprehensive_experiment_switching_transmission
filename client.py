@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import os
+import struct
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
@@ -9,13 +10,19 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
+# ========== 数据包打包解包工具 ==========
+def pack_msg(msg_type: int, payload: bytes) -> bytes:
+    header = struct.pack(">HIH", msg_type, len(payload), 0)
+    return header + payload
+
+def unpack_header(header_bytes: bytes):
+    return struct.unpack(">HIH", header_bytes)
+# ======================================
 
 class MsgBubbleWidget(QWidget):
     """单个气泡控件，区分 自己(右白色) / 他人(左浅灰) / 系统提示(居中灰色)"""
-
     def __init__(self, msg_type, nickname, content):
         super().__init__()
-
         # 消除控件自身默认灰色背景
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background:transparent;")
@@ -54,7 +61,6 @@ class MsgBubbleWidget(QWidget):
                     border:none;
                 }
             """)
-
             layout.addWidget(bubble_widget)
 
         elif msg_type == "other":
@@ -89,7 +95,6 @@ class MsgBubbleWidget(QWidget):
                     border:none;
                 }
             """)
-
             layout.addWidget(bubble_widget)
             layout.addStretch(1)
 
@@ -103,7 +108,6 @@ class MsgBubbleWidget(QWidget):
             label.setStyleSheet("color:#666666; background:transparent; border:none;")
             layout.addWidget(label)
             layout.addStretch(1)
-
 
 class TcpClientThread(QThread):
     msg_signal = pyqtSignal(str)
@@ -125,20 +129,32 @@ class TcpClientThread(QThread):
     async def tcp_task(self):
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+            # 登录握手：发送昵称（旧换行协议）
             self.writer.write((self.nickname + "\n").encode())
             await self.writer.drain()
             self.connect_ok_signal.emit()
+
+            buffer = b""
             while self.running:
-                line = await self.reader.readline()
-                if not line:
+                chunk = await self.reader.read(4096)
+                if not chunk:
                     break
-                text = line.decode().strip()
-                if text.startswith("FILE|"):
-                    parts = text.split("|")
-                    _, fname, sz = parts
-                    self.file_signal.emit(fname, int(sz))
-                else:
-                    self.msg_signal.emit(text)
+                buffer += chunk
+
+                # 解析包头数据包
+                while len(buffer) >= 8:
+                    header_buf = buffer[:8]
+                    msg_type, payload_len, reserved = unpack_header(header_buf)
+                    total_packet_len = 8 + payload_len
+                    if len(buffer) < total_packet_len:
+                        break
+                    full_packet = buffer[:total_packet_len]
+                    buffer = buffer[total_packet_len:]
+                    payload_data = full_packet[8:]
+                    if msg_type == 0:
+                        text = payload_data.decode("utf-8")
+                        self.msg_signal.emit(text)
+
         except Exception as e:
             self.connect_fail_signal.emit(str(e))
         finally:
@@ -151,14 +167,16 @@ class TcpClientThread(QThread):
 
     def send_text(self, text):
         if self.writer:
-            payload = f"{self.nickname}|{text}\n"
-            asyncio.run_coroutine_threadsafe(self._send(payload), self.loop)
+            payload = f"{self.nickname}|{text}".encode("utf-8")
+            packet = pack_msg(0, payload)
+            asyncio.run_coroutine_threadsafe(self._send_raw(packet), self.loop)
 
-    async def _send(self, data):
-        self.writer.write(data.encode())
+    async def _send_raw(self, data: bytes):
+        self.writer.write(data)
         await self.writer.drain()
 
     def send_file(self, filepath):
+        """文件发送【旧协议保留，本次测试文本不要调用】"""
         if not self.writer or not os.path.exists(filepath):
             return
         fname = os.path.basename(filepath)
@@ -179,7 +197,6 @@ class TcpClientThread(QThread):
         if self.writer:
             asyncio.run_coroutine_threadsafe(self.writer.close(), self.loop)
 
-
 class VideoInvitePopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -199,7 +216,6 @@ class VideoInvitePopup(QDialog):
         btn_layout.addWidget(reject_btn)
         layout.addLayout(btn_layout)
         self.setLayout(layout)
-
 
 class LoginDialog(QDialog):
     def __init__(self):
@@ -252,7 +268,6 @@ class LoginDialog(QDialog):
         self.ok_btn.setEnabled(True)
         self.ip_edit.clear()
         self.nick_edit.clear()
-
 
 class ChatMainWindow(QMainWindow):
     def __init__(self, host, nickname, tcp_client):
@@ -318,7 +333,7 @@ class ChatMainWindow(QMainWindow):
         self.msg_list.scrollToBottom()
 
     def on_recv_msg(self, txt):
-        if "joined the chatroom" in txt or "User left" in txt:
+        if "joined the chatroom" in txt or "用户离开" in txt:
             w = MsgBubbleWidget("system", "", txt)
             self.add_msg_item(w)
         elif "|" in txt:
@@ -359,7 +374,6 @@ class ChatMainWindow(QMainWindow):
         self.tcp_client.close_conn()
         self.tcp_client.wait()
         event.accept()
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

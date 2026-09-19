@@ -2,6 +2,8 @@ import sys
 import asyncio
 import os
 import struct
+import hashlib
+import json
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
@@ -23,7 +25,6 @@ class MsgBubbleWidget(QWidget):
     """单个气泡控件，区分 自己(右白色) / 他人(左浅灰) / 系统提示(居中灰色)"""
     def __init__(self, msg_type, nickname, content):
         super().__init__()
-        # 消除控件自身默认灰色背景
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background:transparent;")
 
@@ -35,71 +36,49 @@ class MsgBubbleWidget(QWidget):
         font.setPointSize(10)
 
         if msg_type == "self":
-            # 自己消息：靠右，白色气泡，去掉昵称后缀
             layout.addStretch(1)
-
             bubble_widget = QWidget()
             bubble_layout = QHBoxLayout()
             bubble_layout.setContentsMargins(8, 6, 8, 6)
             bubble_layout.setSpacing(0)
             bubble_widget.setLayout(bubble_layout)
-
             label = QLabel(content)
             label.setWordWrap(True)
             label.setFont(font)
             label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             label.setStyleSheet("background:transparent; border:none;")
-
             bubble_layout.addWidget(label)
             bubble_widget.setStyleSheet("""
-                QWidget{
-                    background-color:#ffffff;
-                    border-radius:10px;
-                    border:1px solid #cccccc;
-                }
-                QWidget QLabel{
-                    border:none;
-                }
+                QWidget{background-color:#ffffff;border-radius:10px;border:1px solid #cccccc;}
+                QWidget QLabel{border:none;}
             """)
             layout.addWidget(bubble_widget)
 
         elif msg_type == "other":
-            # 别人消息：靠左，浅灰气泡，昵称单独label，正文单独label，换行缩进对齐
             bubble_widget = QWidget()
             bubble_layout = QHBoxLayout()
             bubble_layout.setContentsMargins(8, 6, 8, 6)
             bubble_layout.setSpacing(4)
             bubble_widget.setLayout(bubble_layout)
-
             nick_label = QLabel(f"【{nickname}】:")
             nick_label.setFont(font)
             nick_label.setStyleSheet("background:transparent; border:none;")
             nick_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
-
             content_label = QLabel(content)
             content_label.setFont(font)
             content_label.setWordWrap(True)
             content_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             content_label.setStyleSheet("background:transparent; border:none;")
-
             bubble_layout.addWidget(nick_label)
             bubble_layout.addWidget(content_label)
-
             bubble_widget.setStyleSheet("""
-                QWidget{
-                    background-color:#f1f1f1;
-                    border-radius:10px;
-                    border:1px solid #dddddd;
-                }
-                QWidget QLabel{
-                    border:none;
-                }
+                QWidget{background-color:#f1f1f1;border-radius:10px;border:1px solid #dddddd;}
+                QWidget QLabel{border:none;}
             """)
             layout.addWidget(bubble_widget)
             layout.addStretch(1)
 
         elif msg_type == "system":
-            # 系统上下线提示，居中无气泡
             layout.addStretch(1)
             label = QLabel()
             label.setWordWrap(False)
@@ -111,7 +90,8 @@ class MsgBubbleWidget(QWidget):
 
 class TcpClientThread(QThread):
     msg_signal = pyqtSignal(str)
-    file_signal = pyqtSignal(str, int)
+    file_info_signal = pyqtSignal(dict)
+    file_finish_signal = pyqtSignal(bool, str)
     disconnected_signal = pyqtSignal()
     connect_ok_signal = pyqtSignal()
     connect_fail_signal = pyqtSignal(str)
@@ -126,10 +106,28 @@ class TcpClientThread(QThread):
         self.loop = None
         self.running = True
 
+        # 文件接收状态
+        self.recv_file = None
+        self.recv_filename = ""
+        self.recv_total_size = 0
+        self.recv_md5 = ""
+        self.recv_received = 0
+        self.recv_file_path = ""
+
+    def reset_file_recv_state(self):
+        if self.recv_file:
+            self.recv_file.close()
+            self.recv_file = None
+        self.recv_filename = ""
+        self.recv_total_size = 0
+        self.recv_md5 = ""
+        self.recv_received = 0
+        self.recv_file_path = ""
+
     async def tcp_task(self):
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-            # 登录握手：发送昵称（旧换行协议）
+            # 登录握手：发送昵称
             self.writer.write((self.nickname + "\n").encode())
             await self.writer.drain()
             self.connect_ok_signal.emit()
@@ -141,7 +139,6 @@ class TcpClientThread(QThread):
                     break
                 buffer += chunk
 
-                # 解析包头数据包
                 while len(buffer) >= 8:
                     header_buf = buffer[:8]
                     msg_type, payload_len, reserved = unpack_header(header_buf)
@@ -151,13 +148,44 @@ class TcpClientThread(QThread):
                     full_packet = buffer[:total_packet_len]
                     buffer = buffer[total_packet_len:]
                     payload_data = full_packet[8:]
+
                     if msg_type == 0:
+                        # 文本消息
                         text = payload_data.decode("utf-8")
                         self.msg_signal.emit(text)
-
+                    elif msg_type == 1:
+                        # 文件元信息包
+                        meta = json.loads(payload_data.decode("utf-8"))
+                        self.reset_file_recv_state()
+                        self.recv_filename = meta["filename"]
+                        self.recv_total_size = meta["size"]
+                        self.recv_md5 = meta["md5"]
+                        # 保存到当前目录 received_xxx
+                        self.recv_file_path = f"received_{self.recv_filename}"
+                        self.recv_file = open(self.recv_file_path, "wb")
+                        self.file_info_signal.emit(meta)
+                    elif msg_type == 2:
+                        # 文件分片
+                        if self.recv_file is None:
+                            continue
+                        self.recv_file.write(payload_data)
+                        self.recv_received += len(payload_data)
+                        # 判断是否接收完毕
+                        if self.recv_received >= self.recv_total_size:
+                            self.recv_file.close()
+                            self.recv_file = None
+                            # md5校验
+                            h = hashlib.md5()
+                            with open(self.recv_file_path, "rb") as f:
+                                h.update(f.read())
+                            digest = h.hexdigest()
+                            ok = (digest == self.recv_md5)
+                            self.file_finish_signal.emit(ok, self.recv_file_path)
+                            self.reset_file_recv_state()
         except Exception as e:
             self.connect_fail_signal.emit(str(e))
         finally:
+            self.reset_file_recv_state()
             self.disconnected_signal.emit()
 
     def run(self):
@@ -176,21 +204,27 @@ class TcpClientThread(QThread):
         await self.writer.drain()
 
     def send_file(self, filepath):
-        """文件发送【旧协议保留，本次测试文本不要调用】"""
         if not self.writer or not os.path.exists(filepath):
             return
         fname = os.path.basename(filepath)
         size = os.path.getsize(filepath)
-        header = f"FILE|{fname}|{size}\n"
-        asyncio.run_coroutine_threadsafe(self._send_file(header, filepath), self.loop)
+        # 计算md5
+        h = hashlib.md5()
+        with open(filepath, "rb") as f:
+            while c := f.read(4096):
+                h.update(c)
+        md5_val = h.hexdigest()
+        meta = {"filename": fname, "size": size, "md5": md5_val}
+        meta_bytes = json.dumps(meta).encode("utf-8")
+        meta_packet = pack_msg(1, meta_bytes)
+        asyncio.run_coroutine_threadsafe(self._send_file_packets(meta_packet, filepath), self.loop)
 
-    async def _send_file(self, header, path):
-        self.writer.write(header.encode())
-        await self.writer.drain()
+    async def _send_file_packets(self, meta_packet, path):
+        await self._send_raw(meta_packet)
         with open(path, "rb") as f:
             while chunk := f.read(4096):
-                self.writer.write(chunk)
-                await self.writer.drain()
+                pkt = pack_msg(2, chunk)
+                await self._send_raw(pkt)
 
     def close_conn(self):
         self.running = False
@@ -284,20 +318,10 @@ class ChatMainWindow(QMainWindow):
         self.msg_list = QListWidget()
         self.msg_list.setSpacing(4)
         self.msg_list.setStyleSheet("""
-        QListWidget {
-            background:transparent;
-            border:none;
-        }
-        QListWidget::item {
-            border:none;
-            background:transparent;
-        }
-        QListWidget::item:selected {
-            background:transparent;
-        }
-        QListWidget::item:hover {
-            background:transparent;
-        }
+        QListWidget {background:transparent;border:none;}
+        QListWidget::item {border:none;background:transparent;}
+        QListWidget::item:selected {background:transparent;}
+        QListWidget::item:hover {background:transparent;}
         """)
         vl.addWidget(self.msg_list)
 
@@ -322,7 +346,8 @@ class ChatMainWindow(QMainWindow):
         vl.addLayout(input_layout)
 
         self.tcp_client.msg_signal.connect(self.on_recv_msg)
-        self.tcp_client.file_signal.connect(self.on_file_recv)
+        self.tcp_client.file_info_signal.connect(self.on_file_info)
+        self.tcp_client.file_finish_signal.connect(self.on_file_finish)
         self.tcp_client.disconnected_signal.connect(self.on_disconnect)
 
     def add_msg_item(self, bubble_widget):
@@ -344,6 +369,19 @@ class ChatMainWindow(QMainWindow):
             w = MsgBubbleWidget("system", "", txt)
             self.add_msg_item(w)
 
+    def on_file_info(self, meta):
+        fname = meta["filename"]
+        size = meta["size"]
+        w = MsgBubbleWidget("system", "", f"Receiving file: {fname}, size={size} bytes")
+        self.add_msg_item(w)
+
+    def on_file_finish(self, ok, path):
+        if ok:
+            w = MsgBubbleWidget("system", "", f"File saved successfully! Path: {path}")
+        else:
+            w = MsgBubbleWidget("system", "", f"File MD5 check failed, file may be corrupted!")
+        self.add_msg_item(w)
+
     def send_msg(self):
         text = self.msg_input.text().strip()
         if not text:
@@ -357,10 +395,8 @@ class ChatMainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Select File")
         if path:
             self.tcp_client.send_file(path)
-
-    def on_file_recv(self, fname, size):
-        w = MsgBubbleWidget("other", "System", f"Receive file: {fname}, size: {size} bytes")
-        self.add_msg_item(w)
+            w = MsgBubbleWidget("self", self.nickname, f"Sending file: {os.path.basename(path)}")
+            self.add_msg_item(w)
 
     def btn_video_click(self):
         popup = VideoInvitePopup(self)

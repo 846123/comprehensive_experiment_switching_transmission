@@ -1,6 +1,8 @@
 import asyncio
 import os
 import struct
+import hashlib
+import json
 
 # 保存所有在线客户端连接对象，key为客户端连接writer，value为用户昵称
 clients = {}
@@ -19,34 +21,21 @@ def unpack_header(header_bytes: bytes):
     return struct.unpack(">HIH", header_bytes)
 # ======================================
 
-async def broadcast_text(text, exclude_writer=None):
-    """广播文本消息，打包成数据包发送"""
-    payload = text.encode("utf-8")
-    data_packet = pack_msg(0, payload)
+async def broadcast_packet(packet:bytes, exclude_writer=None):
+    """广播完整数据包给全部客户端"""
     for writer in list(clients.keys()):
         if writer is not exclude_writer:
             try:
-                writer.write(data_packet)
+                writer.write(packet)
                 await writer.drain()
             except Exception:
                 pass
 
-async def forward_file(reader, file_size, exclude_writer):
-    """转发文件给其他客户端【旧逻辑保留，暂时不使用】"""
-    remaining = file_size
-    chunk_size = 4096
-    while remaining > 0:
-        chunk = await reader.read(min(chunk_size, remaining))
-        if not chunk:
-            break
-        remaining -= len(chunk)
-        for writer in list(clients.keys()):
-            if writer is not exclude_writer:
-                try:
-                    writer.write(chunk)
-                    await writer.drain()
-                except Exception:
-                    pass
+async def broadcast_text(text, exclude_writer=None):
+    """广播文本消息，打包成数据包发送"""
+    payload = text.encode("utf-8")
+    packet = pack_msg(0, payload)
+    await broadcast_packet(packet, exclude_writer)
 
 async def handle_client(reader, writer):
     # 登录阶段：仍然使用readline读取昵称（旧换行协议）
@@ -64,21 +53,18 @@ async def handle_client(reader, writer):
     buffer = b""
     try:
         while True:
-            # 持续读取字节放入缓冲区
             chunk = await reader.read(4096)
             if not chunk:
                 break
             buffer += chunk
 
-            # 优先解析包头数据包（新协议）
+            # 解析包头数据包
             while len(buffer) >= 8:
                 header_buf = buffer[:8]
                 msg_type, payload_len, reserved = unpack_header(header_buf)
                 total_packet_len = 8 + payload_len
                 if len(buffer) < total_packet_len:
-                    # 数据体还没收够，退出内层循环继续读
                     break
-                # 取出完整包
                 full_packet = buffer[:total_packet_len]
                 buffer = buffer[total_packet_len:]
                 payload_data = full_packet[8:]
@@ -87,25 +73,12 @@ async def handle_client(reader, writer):
                     # 文本消息
                     msg_str = payload_data.decode("utf-8")
                     await broadcast_text(msg_str, exclude_writer=writer)
-                else:
-                    # 其他类型暂时忽略
-                    pass
-
-            # ========= 【临时兼容旧文件协议，测试文本请不要发文件】 =========
-            # 警告：新包头协议和旧FILE裸流会冲突，仅保留用于后续迁移，测试文本时禁用文件
-            # 这段旧协议解析仅保留，本次调试文本聊天不要使用发送文件功能
-            if buffer.find(b"FILE|") == 0:
-                line_end = buffer.find(b"\n")
-                if line_end != -1:
-                    line_bytes = buffer[:line_end+1]
-                    buffer = buffer[line_end+1:]
-                    msg = line_bytes.decode().strip()
-                    if msg.startswith("FILE|"):
-                        parts = msg.split("|")
-                        _, filename, sz_str = parts
-                        file_size = int(sz_str)
-                        await broadcast_text(msg, exclude_writer=writer)
-                        await forward_file(reader, file_size, exclude_writer=writer)
+                elif msg_type == 1:
+                    # 文件元数据包，直接广播给所有人
+                    await broadcast_packet(full_packet, exclude_writer=writer)
+                elif msg_type == 2:
+                    # 文件分片包，直接广播给所有人
+                    await broadcast_packet(full_packet, exclude_writer=writer)
     except Exception:
         pass
     finally:

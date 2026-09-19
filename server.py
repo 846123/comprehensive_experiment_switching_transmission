@@ -10,7 +10,11 @@ audio_participants = set()
 
 
 async def broadcast_text(text, exclude_writer=None):
-    """广播文本消息，发送给全部在线客户端"""
+    """
+    广播文本消息，发送给全部在线客户端
+    :param text: 需要广播的文本内容
+    :param exclude_writer: 需要排除的连接对象，一般为消息发送者，不发给自己
+    """
     data = (text + '\n').encode()
     for writer in list(clients.keys()):
         if writer is not exclude_writer:
@@ -21,73 +25,63 @@ async def broadcast_text(text, exclude_writer=None):
                 pass
 
 
-async def forward_file(reader, file_size, filename, exclude_writer=None):
-    """转发文件给所有在线客户端"""
-    for writer in list(clients.keys()):
-        if writer is not exclude_writer:
-            try:
-                writer.write(f"FILE|{filename}|{file_size}\n".encode())
-                await writer.drain()
-                remain = file_size
-                while remain > 0:
-                    chunk = await reader.read(min(4096, remain))
-                    if not chunk:
-                        break
+async def forward_file(reader, file_size, exclude_writer):
+    """转发文件给其他客户端"""
+    remaining = file_size
+    chunk_size = 4096
+    while remaining > 0:
+        chunk = await reader.read(min(chunk_size, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        for writer in list(clients.keys()):
+            if writer is not exclude_writer:
+                try:
                     writer.write(chunk)
                     await writer.drain()
-                    remain -= len(chunk)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
 
 async def handle_client(reader, writer):
-    addr = writer.get_extra_info('peername')
-    nickname = None
+    nickname_raw = await reader.readline()
+    if not nickname_raw:
+        writer.close()
+        await writer.wait_closed()
+        return
+    nickname = nickname_raw.decode().strip()
+    clients[writer] = nickname
+    # 获取客户端真实IP与端口
+    client_ip, client_port = writer.transport.get_extra_info('peername')
+    await broadcast_text(f"用户('{client_ip}', {client_port}) {nickname} joined the chatroom")
+
     try:
-        # 第一步读取客户端发来的昵称
-        nick_raw = await reader.readline()
-        nickname = nick_raw.decode().strip()
-        if not nickname:
-            return
-
-        clients[writer] = nickname
-        await broadcast_text(f"📢 用户('{addr[0]}', {addr[1]}) {nickname} joined the chatroom")
-
-        buffer = b""
         while True:
-            data = await reader.read(4096)
-            if not data:
+            line = await reader.readline()
+            if not line:
                 break
-            buffer += data
-            while b'\n' in buffer:
-                line, buffer = buffer.split(b'\n', 1)
-                msg = line.decode().strip()
-                if msg.startswith("FILE|"):
-                    parts = msg.split("|")
-                    _, fname, fsize_str = parts
-                    fsize = int(fsize_str)
-                    await forward_file(reader, fsize, fname, writer)
-                    await broadcast_text(f"📁 File received: {fname}", writer)
-                else:
-                    await broadcast_text(f"[{nickname}]: {msg}", writer)
+            msg = line.decode().strip()
+            if msg.startswith("FILE|"):
+                parts = msg.split("|")
+                _, filename, sz_str = parts
+                file_size = int(sz_str)
+                await broadcast_text(msg, exclude_writer=writer)
+                await forward_file(reader, file_size, exclude_writer=writer)
+            else:
+                await broadcast_text(msg, exclude_writer=writer)
     except Exception:
         pass
     finally:
-        # 连接断开，清理全部容器
-        if writer in clients:
-            del clients[writer]
-        video_participants.discard(writer)
-        audio_participants.discard(writer)
+        del clients[writer]
         writer.close()
         await writer.wait_closed()
-        if nickname:
-            await broadcast_text(f"📢 User('{addr[0]}', {addr[1]}) {nickname} left the chatroom")
+        await broadcast_text(f"用户离开: {nickname}")
 
 
 async def main():
-    server = await asyncio.start_server(handle_client, "0.0.0.0", 8888)
-    addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
-    print(f"Server running on {addrs}")
+    # 服务端监听 0.0.0.0:8080
+    server = await asyncio.start_server(handle_client, "0.0.0.0", 8080)
+    print("Server running on 0.0.0.0:8080")
     async with server:
         await server.serve_forever()
 

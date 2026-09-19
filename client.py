@@ -2,9 +2,65 @@ import sys
 import asyncio
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QDialog, QLabel, QMessageBox, QFileDialog)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+                             QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
+                             QDialog, QMessageBox, QFileDialog, QSizePolicy)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont
+
+
+class MsgBubbleWidget(QWidget):
+    """单个气泡控件，区分 自己(右白色) / 他人(左浅灰) / 系统提示(居中灰色)"""
+    def __init__(self, msg_type, nickname, content):
+        super().__init__()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(6,4,6,4)
+        self.setLayout(layout)
+
+        label = QLabel()
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+
+        font = QFont()
+        font.setPointSize(10)
+        label.setFont(font)
+
+        if msg_type == "self":
+            # 自己消息：靠右，白色气泡
+            layout.addStretch(1)
+            label.setText(f"{content} 【{nickname}】")
+            label.setStyleSheet("""
+                QLabel{
+                    background-color:#ffffff;
+                    border:1px solid #cccccc;
+                    border-radius:10px;
+                    padding:7px 10px;
+                    max-width:400px;
+                }
+            """)
+            layout.addWidget(label)
+        elif msg_type == "other":
+            # 别人消息：靠左，浅灰气泡
+            label.setText(f"【{nickname}】: {content}")
+            label.setStyleSheet("""
+                QLabel{
+                    background-color:#f1f1f1;
+                    border:1px solid #dddddd;
+                    border-radius:10px;
+                    padding:7px 10px;
+                    max-width:400px;
+                }
+            """)
+            layout.addWidget(label)
+            layout.addStretch(1)
+        elif msg_type == "system":
+            # 系统上下线提示，居中无气泡，取消max-width，防止提前换行
+            layout.addStretch(1)
+            label.setText(content)
+            label.setStyleSheet("color:#666666; background:transparent;")
+            # 关键：关闭自动换行，长系统信息完整一行展示
+            label.setWordWrap(False)
+            layout.addWidget(label)
+            layout.addStretch(1)
 
 
 class TcpClientThread(QThread):
@@ -14,10 +70,10 @@ class TcpClientThread(QThread):
     connect_ok_signal = pyqtSignal()
     connect_fail_signal = pyqtSignal(str)
 
-    def __init__(self, host, port, nickname):
+    def __init__(self, host, nickname):
         super().__init__()
         self.host = host
-        self.port = port
+        self.port = 8080
         self.nickname = nickname
         self.reader = None
         self.writer = None
@@ -27,7 +83,6 @@ class TcpClientThread(QThread):
     async def tcp_task(self):
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-            # 发送昵称
             self.writer.write((self.nickname + "\n").encode())
             await self.writer.drain()
             self.connect_ok_signal.emit()
@@ -54,7 +109,8 @@ class TcpClientThread(QThread):
 
     def send_text(self, text):
         if self.writer:
-            asyncio.run_coroutine_threadsafe(self._send(text + "\n"), self.loop)
+            payload = f"{self.nickname}|{text}\n"
+            asyncio.run_coroutine_threadsafe(self._send(payload), self.loop)
 
     async def _send(self, data):
         self.writer.write(data.encode())
@@ -65,10 +121,11 @@ class TcpClientThread(QThread):
             return
         fname = os.path.basename(filepath)
         size = os.path.getsize(filepath)
-        asyncio.run_coroutine_threadsafe(self._send_file(filepath, fname, size), self.loop)
+        header = f"FILE|{fname}|{size}\n"
+        asyncio.run_coroutine_threadsafe(self._send_file(header, filepath), self.loop)
 
-    async def _send_file(self, path, fname, size):
-        self.writer.write(f"FILE|{fname}|{size}\n".encode())
+    async def _send_file(self, header, path):
+        self.writer.write(header.encode())
         await self.writer.drain()
         with open(path, "rb") as f:
             while chunk := f.read(4096):
@@ -81,16 +138,14 @@ class TcpClientThread(QThread):
             asyncio.run_coroutine_threadsafe(self.writer.close(), self.loop)
 
 
-# 无边框半透明视频邀请浮窗
 class VideoInvitePopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowOpacity(0.75)
-        self.setFixedSize(280,140)
-        # 放在屏幕右侧
+        self.setFixedSize(280, 140)
         screen_geo = QApplication.primaryScreen().geometry()
-        self.move(screen_geo.width()-300, 120)
+        self.move(screen_geo.width() - 300, 120)
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Incoming Video Call Invite"))
         btn_layout = QHBoxLayout()
@@ -104,12 +159,11 @@ class VideoInvitePopup(QDialog):
         self.setLayout(layout)
 
 
-# Login Dialog：登录阶段完成TCP连接校验
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.setFixedSize(320, 220)
+        self.setFixedSize(320,160)
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Server IP"))
         self.ip_edit = QLineEdit("127.0.0.1")
@@ -130,18 +184,17 @@ class LoginDialog(QDialog):
     def on_ok(self):
         ip = self.ip_edit.text().strip()
         nick = self.nick_edit.text().strip()
-        # 1. 本地校验：空IP、空昵称直接拒绝
+        # 校验：不允许空昵称、空IP
         if not ip or not nick:
-            QMessageBox.warning(self, "Error", "IP and nickname cannot be empty!")
+            QMessageBox.warning(self, "Warning", "IP and nickname cannot be empty!")
             self.ip_edit.clear()
             self.nick_edit.clear()
             return
         self.status_label.setText("Trying to connect...")
         self.ok_btn.setEnabled(False)
-        # 登录弹窗内启动线程尝试连接
-        self.tcp_client = TcpClientThread(ip, 8888, nick)
+        self.tcp_client = TcpClientThread(ip, nick)
         self.tcp_client.connect_ok_signal.connect(self.on_connect_success)
-        self.tcp_client.connect_fail_signal.connect(self.on_connect_failed)
+        self.tcp_client.connect_fail_signal.connect(self.on_connect_fail)
         self.tcp_client.start()
 
     def on_connect_success(self):
@@ -149,49 +202,47 @@ class LoginDialog(QDialog):
         self.host = self.ip_edit.text().strip()
         self.accept()
 
-    def on_connect_failed(self, err_msg):
+    def on_connect_fail(self, err_msg):
         self.status_label.setText("Connection failed!")
-        QMessageBox.critical(self, "Connect Error", f"Can not connect to server:\n{err_msg}")
+        QMessageBox.critical(self, "Error", f"Connect failed:\n{err_msg}")
         self.tcp_client.quit()
         self.tcp_client.wait()
         self.tcp_client = None
-        # 清空输入框
+        self.ok_btn.setEnabled(True)
         self.ip_edit.clear()
         self.nick_edit.clear()
-        self.ok_btn.setEnabled(True)
 
 
-# Main Chat Window：接收已经建好的tcp客户端，不再新建连接
 class ChatMainWindow(QMainWindow):
     def __init__(self, host, nickname, tcp_client):
         super().__init__()
         self.setWindowTitle(f"ChatRoom - {nickname}")
-        self.setGeometry(100, 100, 650, 480)
+        self.setGeometry(100,100,650,480)
         self.nickname = nickname
         self.tcp_client = tcp_client
-        # 绑定信号
-        self.tcp_client.msg_signal.connect(self.append_msg)
-        self.tcp_client.file_signal.connect(self.on_file_recv)
-        self.tcp_client.disconnected_signal.connect(self.on_disconnect)
 
         central = QWidget()
         self.setCentralWidget(central)
         vl = QVBoxLayout(central)
-        self.chat_box = QTextEdit()
-        self.chat_box.setReadOnly(True)
-        vl.addWidget(self.chat_box)
 
+        # QListWidget 作为聊天容器，不再用QTextEdit
+        self.msg_list = QListWidget()
+        self.msg_list.setSpacing(2)
+        vl.addWidget(self.msg_list)
+
+        # 底部按钮栏
         btn_layout = QHBoxLayout()
         self.btn_file = QPushButton("Send File")
         self.btn_file.clicked.connect(self.select_file)
         self.btn_video = QPushButton("Start Video Call")
-        self.btn_video.clicked.connect(self.show_video_invite)
+        self.btn_video.clicked.connect(self.btn_video_click)
         self.btn_mines = QPushButton("Minesweeper")
         btn_layout.addWidget(self.btn_file)
         btn_layout.addWidget(self.btn_video)
         btn_layout.addWidget(self.btn_mines)
         vl.addLayout(btn_layout)
 
+        # 输入框+发送
         input_layout = QHBoxLayout()
         self.msg_input = QLineEdit()
         self.msg_input.setPlaceholderText("Input message...")
@@ -201,14 +252,43 @@ class ChatMainWindow(QMainWindow):
         input_layout.addWidget(self.btn_send)
         vl.addLayout(input_layout)
 
-    def append_msg(self, txt):
-        self.chat_box.append(txt)
+        # 绑定网络信号
+        self.tcp_client.msg_signal.connect(self.on_recv_msg)
+        self.tcp_client.file_signal.connect(self.on_file_recv)
+        self.tcp_client.disconnected_signal.connect(self.on_disconnect)
+
+    def add_msg_item(self, bubble_widget):
+        """添加一条消息到列表，自动滚动到底部"""
+        item = QListWidgetItem()
+        item.setSizeHint(bubble_widget.sizeHint())
+        self.msg_list.addItem(item)
+        self.msg_list.setItemWidget(item, bubble_widget)
+        self.msg_list.scrollToBottom()
+
+    def on_recv_msg(self, txt):
+        """处理收到的网络消息"""
+        if "joined the chatroom" in txt or "用户离开" in txt:
+            # 系统提示
+            w = MsgBubbleWidget("system", "", txt)
+            self.add_msg_item(w)
+        elif "|" in txt:
+            send_nick, content = txt.split("|", 1)
+            w = MsgBubbleWidget("other", send_nick, content)
+            self.add_msg_item(w)
+        else:
+            w = MsgBubbleWidget("system", "", txt)
+            self.add_msg_item(w)
 
     def send_msg(self):
         text = self.msg_input.text().strip()
-        if text:
-            self.tcp_client.send_text(text)
-            self.msg_input.clear()
+        if not text:
+            return
+        # 【核心约定】本地直接渲染自己的消息，不等待服务器返回
+        w = MsgBubbleWidget("self", self.nickname, text)
+        self.add_msg_item(w)
+        # 发送到服务端
+        self.tcp_client.send_text(text)
+        self.msg_input.clear()
 
     def select_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select File")
@@ -216,14 +296,16 @@ class ChatMainWindow(QMainWindow):
             self.tcp_client.send_file(path)
 
     def on_file_recv(self, fname, size):
-        self.append_msg(f"📥 Receiving file {fname}, size:{size}")
+        w = MsgBubbleWidget("other", "System", f"Receive file: {fname}, size: {size} bytes")
+        self.add_msg_item(w)
 
-    def show_video_invite(self):
+    def btn_video_click(self):
         popup = VideoInvitePopup(self)
         popup.exec()
 
     def on_disconnect(self):
-        self.append_msg("⚠️ Disconnected from server")
+        w = MsgBubbleWidget("system", "", "⚠️ Disconnected from server")
+        self.add_msg_item(w)
 
     def closeEvent(self, event):
         self.tcp_client.close_conn()
@@ -235,7 +317,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     login = LoginDialog()
     if login.exec():
-        # 把登录阶段已经建立好的tcp对象传给主窗口，不再新建连接
         win = ChatMainWindow(login.host, login.nickname, login.tcp_client)
         win.show()
         sys.exit(app.exec())

@@ -37,7 +37,7 @@ class MsgBubbleWidget(QWidget):
             layout.addWidget(label)
 
         elif msg_type == "other":
-            # 别人消息：昵称单独label，正文单独label，实现换行缩进对齐
+            # 别人消息：昵称+正文在同一个气泡内，单层边框，换行缩进对齐
             bubble_layout = QHBoxLayout()
             bubble_layout.setContentsMargins(7,7,7,7)
             bubble_layout.setSpacing(4)
@@ -58,14 +58,14 @@ class MsgBubbleWidget(QWidget):
 
             bubble_widget = QWidget()
             bubble_widget.setLayout(bubble_layout)
+            # 【修改重点】仅保留背景色，删除外层边框，统一视觉
             bubble_widget.setStyleSheet("""
                 QWidget{
                     background-color:#f1f1f1;
-                    border:1px solid #dddddd;
                     border-radius:10px;
+                    border:1px solid #dddddd;
                 }
             """)
-
             layout.addWidget(bubble_widget)
             layout.addStretch(1)
 

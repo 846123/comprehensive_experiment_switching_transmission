@@ -1,44 +1,241 @@
 import asyncio
 import os
 import struct
-import hashlib
 import json
+import random
 
-# 保存所有在线客户端连接对象，key为客户端连接writer，value为用户昵称
 clients = {}
-# 参与视频通话的客户端连接集合，仅集合内用户可以收到视频帧数据
-video_participants = set()
-# 参与音频通话的客户端连接集合，仅集合内用户可以收到音频帧数据
-audio_participants = set()
 
-# ========== 数据包打包解包工具 ==========
-def pack_msg(msg_type: int, payload: bytes) -> bytes:
-    # 包头 8字节: >HIH 大端: 2字节类型,4字节长度,2字节预留
-    header = struct.pack(">HIH", msg_type, len(payload), 0)
-    return header + payload
+# ========== 包头工具 ==========
+def pack_msg(msg_type, payload):
+    return struct.pack(">HIH", msg_type, len(payload), 0) + payload
 
-def unpack_header(header_bytes: bytes):
-    return struct.unpack(">HIH", header_bytes)
-# ======================================
+def unpack_header(h):
+    return struct.unpack(">HIH", h)
 
-async def broadcast_packet(packet:bytes, exclude_writer=None):
-    """广播完整数据包给全部客户端"""
-    for writer in list(clients.keys()):
-        if writer is not exclude_writer:
+# ========== 扫雷房间全局状态 ==========
+MS_ROWS, MS_COLS, MS_MINES = 16, 16, 40
+MS_MAX_PLAYER = 6
+MS_MIN_PLAYER = 2
+MS_WAIT_SEC = 15
+
+ms_room = {
+    "state": "idle",          # idle / waiting / gaming
+    "inviter": None,
+    "inviter_writer": None,
+    "players": [],            # [{"nick":..,"writer":..}]
+    "countdown_task": None,
+    "mine_map": None,
+    "cell_number": None,
+    "cell_state": None,       # 0 closed / 1 open / 2 flag
+    "current_idx": 0,
+}
+
+def ms_reset():
+    if ms_room["countdown_task"]:
+        ms_room["countdown_task"].cancel()
+        ms_room["countdown_task"] = None
+    ms_room["state"] = "idle"
+    ms_room["inviter"] = None
+    ms_room["inviter_writer"] = None
+    ms_room["players"] = []
+    ms_room["mine_map"] = None
+    ms_room["cell_number"] = None
+    ms_room["cell_state"] = None
+    ms_room["current_idx"] = 0
+
+async def broadcast_packet(packet, exclude=None):
+    for w in list(clients.keys()):
+        if w is not exclude:
             try:
-                writer.write(packet)
-                await writer.drain()
+                w.write(packet)
+                await w.drain()
             except Exception:
                 pass
 
-async def broadcast_text(text, exclude_writer=None):
-    """广播文本消息，打包成数据包发送"""
-    payload = text.encode("utf-8")
-    packet = pack_msg(0, payload)
-    await broadcast_packet(packet, exclude_writer)
+async def broadcast_text(text, exclude=None):
+    await broadcast_packet(pack_msg(0, text.encode("utf-8")), exclude)
+
+async def ms_broadcast(payload_dict, exclude=None):
+    pkt = pack_msg(4, json.dumps(payload_dict).encode("utf-8"))
+    for p in ms_room["players"]:
+        w = p["writer"]
+        if w is not exclude:
+            try:
+                w.write(pkt)
+                await w.drain()
+            except Exception:
+                pass
+
+def ms_gen_map(sx=None, sy=None):
+    r, c = MS_ROWS, MS_COLS
+    mines = set()
+    while len(mines) < MS_MINES:
+        x = random.randint(0, r-1)
+        y = random.randint(0, c-1)
+        if sx is not None and abs(x-sx) <= 1 and abs(y-sy) <= 1:
+            continue
+        mines.add((x, y))
+    mm = [[False]*c for _ in range(r)]
+    for x, y in mines:
+        mm[x][y] = True
+    num = [[0]*c for _ in range(r)]
+    for x in range(r):
+        for y in range(c):
+            if mm[x][y]:
+                continue
+            cnt = 0
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    nx, ny = x+dx, y+dy
+                    if 0 <= nx < r and 0 <= ny < c and mm[nx][ny]:
+                        cnt += 1
+            num[x][y] = cnt
+    ms_room["mine_map"] = mm
+    ms_room["cell_number"] = num
+    ms_room["cell_state"] = [[0]*c for _ in range(r)]
+
+def ms_expand(sx, sy):
+    r, c = MS_ROWS, MS_COLS
+    stack = [(sx, sy)]
+    visited = set()
+    while stack:
+        x, y = stack.pop()
+        if (x, y) in visited:
+            continue
+        visited.add((x, y))
+        if ms_room["cell_state"][x][y] != 0:
+            continue
+        ms_room["cell_state"][x][y] = 1
+        if ms_room["cell_number"][x][y] == 0:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    nx, ny = x+dx, y+dy
+                    if 0 <= nx < r and 0 <= ny < c and not ms_room["mine_map"][nx][ny]:
+                        stack.append((nx, ny))
+
+def ms_check_win():
+    for x in range(MS_ROWS):
+        for y in range(MS_COLS):
+            if not ms_room["mine_map"][x][y] and ms_room["cell_state"][x][y] != 1:
+                return False
+    return True
+
+def ms_build_update():
+    cells = []
+    for x in range(MS_ROWS):
+        row = []
+        for y in range(MS_COLS):
+            s = ms_room["cell_state"][x][y]
+            if s == 0:
+                row.append("c")
+            elif s == 2:
+                row.append("f")
+            else:
+                row.append(str(ms_room["cell_number"][x][y]))
+        cells.append(row)
+    cur = ms_room["players"][ms_room["current_idx"]]["nick"] if ms_room["players"] else None
+    return {
+        "cmd": "update",
+        "cells": cells,
+        "current": cur,
+        "players": [p["nick"] for p in ms_room["players"]],
+    }
+
+async def ms_countdown():
+    await asyncio.sleep(MS_WAIT_SEC)
+    if ms_room["state"] != "waiting":
+        return
+    if len(ms_room["players"]) < MS_MIN_PLAYER:
+        await ms_broadcast({"cmd": "cancel", "msg": "Not enough players"})
+        ms_reset()
+    else:
+        ms_room["state"] = "gaming"
+        ms_gen_map()
+        ms_room["current_idx"] = 0
+        await ms_broadcast({
+            "cmd": "start",
+            "rows": MS_ROWS,
+            "cols": MS_COLS,
+            "mine_count": MS_MINES,
+            "players": [p["nick"] for p in ms_room["players"]],
+            "current": ms_room["players"][0]["nick"],
+        })
+
+async def ms_handle_cmd(data, nick, writer):
+    cmd = data.get("cmd")
+
+    if cmd == "invite":
+        if ms_room["state"] != "idle":
+            writer.write(pack_msg(4, json.dumps({"cmd": "busy"}).encode()))
+            await writer.drain()
+            return
+        ms_room["state"] = "waiting"
+        ms_room["inviter"] = nick
+        ms_room["inviter_writer"] = writer
+        ms_room["players"] = [{"nick": nick, "writer": writer}]
+        await broadcast_packet(pack_msg(4, json.dumps({
+            "cmd": "invite", "inviter": nick, "max": MS_MAX_PLAYER
+        }).encode()))
+        ms_room["countdown_task"] = asyncio.create_task(ms_countdown())
+
+    elif cmd == "accept":
+        if ms_room["state"] != "waiting":
+            return
+        if any(p["nick"] == nick for p in ms_room["players"]):
+            return
+        if len(ms_room["players"]) >= MS_MAX_PLAYER:
+            writer.write(pack_msg(4, json.dumps({"cmd": "full"}).encode()))
+            await writer.drain()
+            return
+        ms_room["players"].append({"nick": nick, "writer": writer})
+        await ms_broadcast({
+            "cmd": "join",
+            "player": nick,
+            "players": [p["nick"] for p in ms_room["players"]],
+            "count": len(ms_room["players"]),
+        })
+
+    elif cmd == "reject":
+        pass
+
+    elif cmd == "cancel":
+        if ms_room["inviter_writer"] is writer and ms_room["state"] == "waiting":
+            await ms_broadcast({"cmd": "cancel", "msg": "Inviter cancelled"})
+            ms_reset()
+
+    elif cmd == "click":
+        if ms_room["state"] != "gaming" or not ms_room["players"]:
+            return
+        cur = ms_room["players"][ms_room["current_idx"]]
+        if cur["nick"] != nick:
+            return
+        x, y = data.get("x"), data.get("y")
+        action = data.get("action")
+        if not (isinstance(x, int) and isinstance(y, int) and 0 <= x < MS_ROWS and 0 <= y < MS_COLS):
+            return
+        if action == "flag":
+            if ms_room["cell_state"][x][y] == 0:
+                ms_room["cell_state"][x][y] = 2
+            elif ms_room["cell_state"][x][y] == 2:
+                ms_room["cell_state"][x][y] = 0
+        elif action == "open":
+            if ms_room["cell_state"][x][y] in (1, 2):
+                return
+            if ms_room["mine_map"][x][y]:
+                mines = [[mx, my] for mx in range(MS_ROWS) for my in range(MS_COLS) if ms_room["mine_map"][mx][my]]
+                await ms_broadcast({"cmd": "gameover", "loser": nick, "mines": mines})
+                ms_reset()
+                return
+            ms_expand(x, y)
+            if ms_check_win():
+                await ms_broadcast({"cmd": "win"})
+                ms_reset()
+                return
+        ms_room["current_idx"] = (ms_room["current_idx"] + 1) % len(ms_room["players"])
+        await ms_broadcast(ms_build_update())
 
 async def handle_client(reader, writer):
-    # 登录阶段：仍然使用readline读取昵称（旧换行协议）
     nickname_raw = await reader.readline()
     if not nickname_raw:
         writer.close()
@@ -46,9 +243,8 @@ async def handle_client(reader, writer):
         return
     nickname = nickname_raw.decode().strip()
     clients[writer] = nickname
-    # 获取客户端真实IP与端口
-    client_ip, client_port = writer.transport.get_extra_info('peername')
-    await broadcast_text(f"用户('{client_ip}', {client_port}) {nickname} joined the chatroom")
+    ip, port = writer.transport.get_extra_info('peername')
+    await broadcast_text(f"User('{ip}',{port}) {nickname} joined")
 
     buffer = b""
     try:
@@ -57,38 +253,56 @@ async def handle_client(reader, writer):
             if not chunk:
                 break
             buffer += chunk
-
-            # 解析包头数据包
             while len(buffer) >= 8:
-                header_buf = buffer[:8]
-                msg_type, payload_len, reserved = unpack_header(header_buf)
-                total_packet_len = 8 + payload_len
-                if len(buffer) < total_packet_len:
+                mt, pl, _ = unpack_header(buffer[:8])
+                total = 8 + pl
+                if len(buffer) < total:
                     break
-                full_packet = buffer[:total_packet_len]
-                buffer = buffer[total_packet_len:]
-                payload_data = full_packet[8:]
-
-                if msg_type == 0:
-                    # 文本消息
-                    msg_str = payload_data.decode("utf-8")
-                    await broadcast_text(msg_str, exclude_writer=writer)
-                elif msg_type == 1:
-                    # 文件元数据包，直接广播给所有人
-                    await broadcast_packet(full_packet, exclude_writer=writer)
-                elif msg_type == 2:
-                    # 文件分片包，直接广播给所有人
-                    await broadcast_packet(full_packet, exclude_writer=writer)
+                pkt = buffer[:total]
+                buffer = buffer[total:]
+                payload = pkt[8:]
+                if mt in (0, 1, 2):
+                    await broadcast_packet(pkt)
+                elif mt == 4:
+                    try:
+                        data = json.loads(payload.decode("utf-8"))
+                    except Exception:
+                        continue
+                    await ms_handle_cmd(data, nickname, writer)
     except Exception:
         pass
     finally:
+        if ms_room["state"] in ("waiting", "gaming"):
+            before = len(ms_room["players"])
+            ms_room["players"] = [p for p in ms_room["players"] if p["writer"] is not writer]
+            after = len(ms_room["players"])
+            if before != after:
+                if ms_room["state"] == "waiting":
+                    await ms_broadcast({
+                        "cmd": "leave_wait",
+                        "players": [p["nick"] for p in ms_room["players"]],
+                        "count": after,
+                    })
+                elif ms_room["state"] == "gaming":
+                    if after < MS_MIN_PLAYER:
+                        await ms_broadcast({"cmd": "abort", "msg": "Player left, game aborted"})
+                        ms_reset()
+                    else:
+                        if ms_room["current_idx"] >= after:
+                            ms_room["current_idx"] = 0
+                        await ms_broadcast(ms_build_update())
+            if ms_room["inviter_writer"] is writer and ms_room["state"] == "waiting":
+                await ms_broadcast({"cmd": "cancel", "msg": "Inviter left"})
+                ms_reset()
         del clients[writer]
-        writer.close()
-        await writer.wait_closed()
-        await broadcast_text(f"用户离开: {nickname}")
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+        await broadcast_text(f"User left: {nickname}")
 
 async def main():
-    # 服务端监听 0.0.0.0:8080
     server = await asyncio.start_server(handle_client, "0.0.0.0", 8080)
     print("Server running on 0.0.0.0:8080")
     async with server:

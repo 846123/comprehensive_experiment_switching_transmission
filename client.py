@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
     QDialog, QMessageBox, QFileDialog, QGridLayout, QSizePolicy,
-    QAbstractItemView, QListView
+    QListView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont
@@ -24,53 +24,76 @@ def unpack_header(h):
 class MsgBubbleWidget(QWidget):
     def __init__(self, msg_type, nick, text):
         super().__init__()
-        # 自身尺寸策略：水平可扩展，垂直随内容自适应
+        # 外层控件：水平撑满列表项，高度随内容自适应
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QHBoxLayout()
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(8)
 
-        self.label = QLabel(text)
-        # 标签尺寸策略：水平可扩展，垂直随内容收缩
-        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
-        # 系统消息关闭自动换行，普通消息开启自动换行
-        if msg_type == "system":
-            self.label.setWordWrap(False)
-        else:
-            self.label.setWordWrap(True)
-
         font = QFont()
         font.setPointSize(10)
-        self.label.setFont(font)
 
         if msg_type == "self":
-            # 自己消息靠右
+            # 自己消息：左边占位拉伸，气泡靠右
             layout.addStretch(1)
-            self.label.setStyleSheet(
+            self.bubble = QLabel(text)
+            self.bubble.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            self.bubble.setWordWrap(True)
+            self.bubble.setFont(font)
+            self.bubble.setStyleSheet(
                 "background-color:#ffffff; border:1px solid #cccccc; border-radius:8px; padding:6px;"
             )
-            layout.addWidget(self.label)
+            layout.addWidget(self.bubble)
+
         elif msg_type == "other":
-            # 别人消息靠左
-            layout.addWidget(self.label)
-            self.label.setStyleSheet(
+            # 别人消息：气泡靠左，右边占位拉伸
+            # 气泡容器：开启样式渲染，支持背景圆角
+            self.bubble = QWidget()
+            self.bubble.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            self.bubble.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            self.bubble.setStyleSheet(
                 "background-color:#f1f1f1; border:1px solid #dddddd; border-radius:8px; padding:6px;"
             )
+
+            # 气泡内部：昵称+内容 水平布局
+            bubble_layout = QHBoxLayout(self.bubble)
+            bubble_layout.setContentsMargins(0, 0, 0, 0)
+            bubble_layout.setSpacing(4)
+
+            # 昵称标签
+            nick_label = QLabel(f"【{nick}】：")
+            nick_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            nick_label.setFont(font)
+
+            # 内容标签：自动换行，换行后和文本首行对齐
+            content_label = QLabel(text)
+            content_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            content_label.setWordWrap(True)
+            content_label.setFont(font)
+
+            bubble_layout.addWidget(nick_label)
+            bubble_layout.addWidget(content_label, 1)
+
+            layout.addWidget(self.bubble)
             layout.addStretch(1)
+
         else:
-            # 系统消息居中、单行
+            # 系统消息：左右拉伸，真正居中
+            self.bubble = QLabel(text)
+            self.bubble.setWordWrap(False)
+            self.bubble.setFont(font)
+            self.bubble.setStyleSheet("color:#666666; background:transparent;")
             layout.addStretch(1)
-            layout.addWidget(self.label)
+            layout.addWidget(self.bubble)
             layout.addStretch(1)
-            self.label.setStyleSheet("color:#666666; background:transparent;")
 
         self.setLayout(layout)
 
-    # 动态设置气泡最大宽度
+    # 动态设置气泡的最大宽度（仅作用于内部气泡，不影响外层控件宽度）
     def set_bubble_max_width(self, max_width):
-        self.label.setMaximumWidth(max_width)
+        if hasattr(self, 'bubble'):
+            self.bubble.setMaximumWidth(max_width)
         self.adjustSize()
 
 
@@ -318,10 +341,15 @@ class ChatMainWindow(QMainWindow):
 
         self.msg_list = QListWidget()
         self.msg_list.setSpacing(4)
-        self.msg_list.setStyleSheet("QListWidget{background:transparent;border:none;}")
+        # 去掉列表项选中高亮，避免干扰气泡视觉
+        self.msg_list.setStyleSheet("""
+            QListWidget{background:transparent;border:none;}
+            QListWidget::item{background:transparent;}
+            QListWidget::item:selected{background:transparent;}
+        """)
         # 视口变化时自动重排所有列表项
         self.msg_list.setResizeMode(QListView.ResizeMode.Adjust)
-        # 关闭横向滚动条，避免宽度溢出出现滚动条
+        # 关闭横向滚动条
         self.msg_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         vl.addWidget(self.msg_list)
 
@@ -356,27 +384,25 @@ class ChatMainWindow(QMainWindow):
         item = QListWidgetItem()
         self.msg_list.addItem(item)
         self.msg_list.setItemWidget(item, widget)
-        # 新消息添加后立即更新宽度，保证尺寸正确
+        # 新消息添加后立即更新宽度
         self.update_bubbles_width()
         self.msg_list.scrollToBottom()
 
     def update_bubbles_width(self):
         viewport_width = self.msg_list.viewport().width()
-        # 气泡内文本最大宽度：视口宽度80%，上限600px，下限120px
-        max_width = int(viewport_width * 0.8)
-        max_width = max(120, min(max_width, 600))
+        # 气泡最大宽度：视口宽度70%，仅保留120px下限
+        max_width = int(viewport_width * 0.7)
+        max_width = max(120, max_width)
 
-        # 遍历所有消息项：更新气泡宽度 + 强制列表项撑满整个视口宽度
+        # 遍历所有消息项：更新气泡宽度 + 列表项高度自适应
         for i in range(self.msg_list.count()):
             item = self.msg_list.item(i)
             widget = self.msg_list.itemWidget(item)
             if isinstance(widget, MsgBubbleWidget):
                 widget.set_bubble_max_width(max_width)
-                # 关键：列表项宽度 = 视口宽度，高度随气泡内容自适应
                 item.setSizeHint(QSize(viewport_width, widget.sizeHint().height()))
 
     def resizeEvent(self, event):
-        # 窗口缩放时重算所有气泡宽度和列表项尺寸
         super().resizeEvent(event)
         self.update_bubbles_width()
 
@@ -384,17 +410,24 @@ class ChatMainWindow(QMainWindow):
         txt = self.msg_input.text().strip()
         if not txt:
             return
-        # 本地渲染自己的消息，服务端不回发
+        # 本地渲染自己的消息
         self.add_bubble(MsgBubbleWidget("self", self.nick, txt))
         self.tcp.send_text(txt)
         self.msg_input.clear()
 
     def on_recv_msg(self, txt):
-        # 区分系统消息和普通消息
         if "joined" in txt or "left" in txt:
             self.add_bubble(MsgBubbleWidget("system", "", txt))
         else:
-            self.add_bubble(MsgBubbleWidget("other", "", txt))
+            # 拆分昵称和消息内容
+            if txt.startswith("【") and "】：" in txt:
+                end_pos = txt.index("】：")
+                nick = txt[1:end_pos]
+                content = txt[end_pos + 2:]
+            else:
+                nick = ""
+                content = txt
+            self.add_bubble(MsgBubbleWidget("other", nick, content))
 
     def invite_minesweeper(self):
         self.tcp.send_ms_cmd({"cmd": "invite"})

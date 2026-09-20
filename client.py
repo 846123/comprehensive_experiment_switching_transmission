@@ -17,8 +17,7 @@ def unpack_header(h):
     return struct.unpack(">HIH", h)
 
 # ========== 聊天气泡组件 ==========
-# ========== 聊天气泡组件【仅修改此类，其余代码完全不动】 ==========
-# ========== 聊天气泡组件【仅修改此类，其余代码完全不动】 ==========
+# ========== 聊天气泡组件【修复双层边框，仅替换此类】 ==========
 class MsgBubbleWidget(QWidget):
     def __init__(self, msg_type, nick, text):
         super().__init__()
@@ -39,12 +38,12 @@ class MsgBubbleWidget(QWidget):
         self.text_label = None
 
         if self.msg_type == "self":
-            # 自己消息：靠右，无昵称，气泡紧贴文本
+            # 自己消息：靠右，无昵称，气泡紧贴文本，样式在text_label
             self.main_layout.addStretch(1)
             bubble_container = QWidget()
             bubble_container.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             bubble_layout = QVBoxLayout(bubble_container)
-            bubble_layout.setContentsMargins(6,6,6,6)
+            bubble_layout.setContentsMargins(0,0,0,0)
             bubble_layout.setSpacing(0)
             self.text_label = QLabel(self.raw_text)
             self.text_label.setFont(self.font)
@@ -54,12 +53,13 @@ class MsgBubbleWidget(QWidget):
                 background-color:#ffffff;
                 border:1px solid #cccccc;
                 border-radius:8px;
+                padding:6px;
             """)
             bubble_layout.addWidget(self.text_label)
             self.main_layout.addWidget(bubble_container)
 
         elif self.msg_type == "other":
-            # 别人消息：昵称单独一行顶格，下方气泡整体右缩进（缩进在气泡外部，不包进气泡）
+            # 别人消息：昵称单独一行顶格，下方气泡整体右缩进，样式移到text_label，外层容器无样式
             outer_vbox = QVBoxLayout()
             outer_vbox.setContentsMargins(0,0,0,0)
             outer_vbox.setSpacing(3)
@@ -79,21 +79,23 @@ class MsgBubbleWidget(QWidget):
             indent_widget.setFixedWidth(self.indent_size)
             bubble_hbox.addWidget(indent_widget)
 
-            # 气泡容器
+            # 气泡容器：仅布局载体，**不设置任何背景边框**
             bubble_container = QWidget()
             bubble_container.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             bubble_layout = QVBoxLayout(bubble_container)
-            bubble_layout.setContentsMargins(6,6,6,6)
+            bubble_layout.setContentsMargins(0,0,0,0)
             bubble_layout.setSpacing(0)
-            bubble_container.setStyleSheet("""
-                background-color:#f1f1f1;
-                border:1px solid #dddddd;
-                border-radius:8px;
-            """)
             self.text_label = QLabel(self.raw_text)
             self.text_label.setFont(self.font)
             self.text_label.setWordWrap(True)
             self.text_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+            # 样式全部放在text_label，只单层边框
+            self.text_label.setStyleSheet("""
+                background-color:#f1f1f1;
+                border:1px solid #dddddd;
+                border-radius:8px;
+                padding:6px;
+            """)
             bubble_layout.addWidget(self.text_label)
             bubble_hbox.addWidget(bubble_container)
 
@@ -119,6 +121,7 @@ class MsgBubbleWidget(QWidget):
             avail_w = w
         if self.msg_type in ("self", "other") and self.text_label is not None:
             self.text_label.setMaximumWidth(avail_w)
+
 
 # ========== 网络线程 ==========
 class TcpClientThread(QThread):

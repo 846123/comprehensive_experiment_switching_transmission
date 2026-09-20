@@ -4,11 +4,10 @@ import asyncio
 import struct
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
-    QDialog, QMessageBox, QFileDialog, QGridLayout, QSizePolicy,
-    QListView
+    QLabel, QLineEdit, QPushButton, QDialog, QMessageBox, QFileDialog,
+    QGridLayout, QSizePolicy, QScrollArea
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 def pack_msg(msg_type, payload):
@@ -17,89 +16,83 @@ def pack_msg(msg_type, payload):
 def unpack_header(h):
     return struct.unpack(">HIH", h)
 
-# ========== 聊天气泡组件【修复：留白、自动换行、对齐问题】 ==========
+# ========== 聊天气泡组件 ==========
 class MsgBubbleWidget(QWidget):
     def __init__(self, msg_type, nick, text):
         super().__init__()
         self.msg_type = msg_type
         self.nick = nick
         self.raw_text = text
-        self.bubble_max_width = 0
-        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+        self.max_bubble_width = 0
+
+        self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
+        self.main_layout = QHBoxLayout()
+        self.main_layout.setContentsMargins(0, 2, 0, 2)
+        self.main_layout.setSpacing(0)
+        self.setLayout(self.main_layout)
+
         self.font = QFont()
         self.font.setPointSize(10)
-        self.init_ui()
+        self.text_label = None  # 初始化，sys类型保持None
 
-    def init_ui(self):
         if self.msg_type == "self":
-            # 自己消息：气泡靠右
-            self.layout = QHBoxLayout()
-            self.layout.setContentsMargins(0, 2, 0, 2)
-            self.layout.setSpacing(0)
-            self.layout.addStretch(1)
-            self.text_container = QWidget()
-            self.text_layout = QVBoxLayout(self.text_container)
-            self.text_layout.setContentsMargins(6,6,6,6)
-            self.text_layout.setSpacing(0)
-            self.bubble_label = QLabel()
-            self.bubble_label.setFont(self.font)
-            self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
-            self.bubble_label.setWordWrap(True)
-            self.bubble_label.setStyleSheet("background-color:#ffffff; border:1px solid #cccccc; border-radius:8px;")
-            self.text_layout.addWidget(self.bubble_label)
-            self.layout.addWidget(self.text_container)
-            self.setLayout(self.layout)
+            # 自己消息：靠右，前面加拉伸
+            self.main_layout.addStretch(1)
+            bubble_container = QWidget()
+            bubble_layout = QVBoxLayout(bubble_container)
+            bubble_layout.setContentsMargins(6,6,6,6)
+            bubble_layout.setSpacing(0)
+            self.text_label = QLabel(self.raw_text)
+            self.text_label.setFont(self.font)
+            self.text_label.setWordWrap(True)
+            self.text_label.setStyleSheet("""
+                background-color:#ffffff;
+                border:1px solid #cccccc;
+                border-radius:8px;
+            """)
+            bubble_layout.addWidget(self.text_label)
+            self.main_layout.addWidget(bubble_container)
 
         elif self.msg_type == "other":
-            # 别人消息：气泡靠左，空白在右侧，消除左侧留白
-            self.layout = QHBoxLayout()
-            self.layout.setContentsMargins(0, 2, 0, 2)
-            self.layout.setSpacing(0)
-            bubble_col = QVBoxLayout()
-            bubble_col.setContentsMargins(0,0,0,0)
-            bubble_col.setSpacing(3)
-            lb_nick = QLabel(self.nick)
-            lb_nick.setFont(self.font)
-            lb_nick.setStyleSheet("background:transparent; border:none;")
-            lb_nick.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            self.text_container = QWidget()
-            self.text_layout = QVBoxLayout(self.text_container)
-            self.text_layout.setContentsMargins(6,6,6,6)
-            self.text_layout.setSpacing(0)
-            self.bubble_label = QLabel()
-            self.bubble_label.setFont(self.font)
-            self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
-            self.bubble_label.setWordWrap(True)
-            self.bubble_label.setStyleSheet("background-color:#f1f1f1; border:1px solid #dddddd; border-radius:8px;")
-            self.text_layout.addWidget(self.bubble_label)
-            bubble_col.addWidget(lb_nick)
-            bubble_col.addWidget(self.text_container)
-            self.layout.addLayout(bubble_col)
-            self.layout.addStretch(1)
-            self.setLayout(self.layout)
+            # 别人消息：靠左，昵称顶格，正文缩进2汉字(约36px)
+            bubble_container = QWidget()
+            bubble_layout = QVBoxLayout(bubble_container)
+            bubble_layout.setContentsMargins(0,0,0,0)
+            bubble_layout.setSpacing(3)
+            nick_label = QLabel(self.nick)
+            nick_label.setFont(self.font)
+            nick_label.setStyleSheet("color:#444444;")
+            self.text_label = QLabel(self.raw_text)
+            self.text_label.setFont(self.font)
+            self.text_label.setWordWrap(True)
+            self.text_label.setStyleSheet("""
+                background-color:#f1f1f1;
+                border:1px solid #dddddd;
+                border-radius:8px;
+                padding:6px;
+            """)
+            self.text_label.setContentsMargins(36,0,0,0) # 2汉字缩进
+            bubble_layout.addWidget(nick_label)
+            bubble_layout.addWidget(self.text_label)
+            self.main_layout.addWidget(bubble_container)
+            self.main_layout.addStretch(1)
 
-        else:
-            # 系统消息
-            self.layout = QHBoxLayout()
-            self.layout.setContentsMargins(0, 2, 0, 2)
-            self.bubble_label = QLabel()
-            self.bubble_label.setFont(self.font)
-            self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
-            self.bubble_label.setWordWrap(True)
-            self.bubble_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.bubble_label.setStyleSheet("color:#666; background:transparent; border:none;")
-            self.layout.addWidget(self.bubble_label)
-            self.setLayout(self.layout)
+        elif self.msg_type == "sys":
+            # 系统消息居中
+            self.main_layout.addStretch(1)
+            label = QLabel(self.raw_text)
+            label.setFont(self.font)
+            label.setStyleSheet("color:#666666;")
+            self.main_layout.addWidget(label)
+            self.main_layout.addStretch(1)
 
     def set_bubble_max_width(self, w):
-        self.bubble_max_width = w
-        self.bubble_label.setMaximumWidth(w)
-        self.bubble_label.setText(self.raw_text)
-        self.bubble_label.adjustSize()
-        self.adjustSize()
-        self.updateGeometry()
+        self.max_bubble_width = w
+        # 增加判断：只有text_label不为空才设置最大宽度，跳过sys消息
+        if self.msg_type in ("self", "other") and self.text_label is not None:
+            self.text_label.setMaximumWidth(w)
 
-# ========== 网络线程【完全原样保留】 ==========
+# ========== 网络线程 ==========
 class TcpClientThread(QThread):
     msg_signal = pyqtSignal(str)
     ms_signal = pyqtSignal(dict)
@@ -174,7 +167,7 @@ class TcpClientThread(QThread):
         if self.writer:
             asyncio.run_coroutine_threadsafe(self.writer.close(), self.loop)
 
-# ========== 扫雷窗口【原样保留】 ==========
+# ========== 扫雷窗口 ==========
 class MinesweeperWindow(QDialog):
     def __init__(self, parent, tcp, my_nick):
         super().__init__(parent)
@@ -191,19 +184,17 @@ class MinesweeperWindow(QDialog):
     def init_ui(self):
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
-        self.player_list = QListWidget()
+        self.player_list = QLabel("Players:")
         self.status_label = QLabel("Waiting game...")
-        left_layout.addWidget(QLabel("Players:"))
         left_layout.addWidget(self.player_list)
         left_layout.addWidget(self.status_label)
         grid_widget = QWidget()
-        grid_layout = QGridLayout(grid_widget)
-        grid_layout.setSpacing(2)
+        self.grid_layout = QGridLayout(grid_widget)
+        self.grid_layout.setSpacing(2)
         main_layout.addLayout(left_layout, 1)
         main_layout.addWidget(grid_widget, 4)
         self.setLayout(main_layout)
         self.setMinimumSize(750, 520)
-        self.grid_layout = grid_layout
 
     def build_grid(self):
         for btn in self.buttons.values():
@@ -212,14 +203,15 @@ class MinesweeperWindow(QDialog):
         for x in range(self.rows):
             for y in range(self.cols):
                 btn = QPushButton("")
-                btn.setFixedSize(32, 32)
-                f = QFont("Arial", 12, QFont.Weight.Bold)
+                btn.setFixedSize(32,32)
+                f = QFont("Arial",12)
+                f.setBold(True)
                 btn.setFont(f)
                 btn.clicked.connect(lambda ch, xx=x, yy=y: self.on_click(xx, yy, "open"))
                 btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 btn.customContextMenuRequested.connect(lambda pos, xx=x, yy=y: self.on_click(xx, yy, "flag"))
                 self.grid_layout.addWidget(btn, x, y)
-                self.buttons[(x, y)] = btn
+                self.buttons[(x,y)] = btn
 
     def on_click(self, x, y, action):
         self.tcp.send_ms_cmd({"cmd": "click", "x": x, "y": y, "action": action})
@@ -227,15 +219,7 @@ class MinesweeperWindow(QDialog):
     def update_board(self, cells, current, players):
         self.current_player = current
         self.players = players
-        self.player_list.clear()
-        for p in players:
-            line = p
-            if p == current:
-                line += " << YOUR TURN"
-            item = QListWidgetItem(line)
-            if p == current:
-                item.setForeground(Qt.GlobalColor.red)
-            self.player_list.addItem(item)
+        self.player_list.setText("Players:\n" + "\n".join([p + (" << YOUR TURN" if p == current else "") for p in players]))
         if current == self.my_nick:
             self.status_label.setText("YOUR TURN, click to open / right click flag")
             self.status_label.setStyleSheet("color:red;")
@@ -245,7 +229,7 @@ class MinesweeperWindow(QDialog):
         for x in range(self.rows):
             for y in range(self.cols):
                 val = cells[x][y]
-                btn = self.buttons[(x, y)]
+                btn = self.buttons[(x,y)]
                 if val == "c":
                     btn.setText("")
                     btn.setStyleSheet("background:#cfcfcf; border:1px solid #bbb;")
@@ -259,15 +243,15 @@ class MinesweeperWindow(QDialog):
                     btn.setStyleSheet("background:#ffffff; border:1px solid #bbb;")
                     btn.setEnabled(False)
 
-# ========== 视频通话弹窗【原样保留】 ==========
+# ========== 视频弹窗 ==========
 class VideoInvitePopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowOpacity(0.75)
-        self.setFixedSize(280, 140)
+        self.setFixedSize(280,140)
         scr = QApplication.primaryScreen().geometry()
-        self.move(scr.width() - 300, 120)
+        self.move(scr.width()-300, 120)
         lay = QVBoxLayout()
         lay.addWidget(QLabel("Incoming Video Call Invite"))
         hlay = QHBoxLayout()
@@ -280,12 +264,12 @@ class VideoInvitePopup(QDialog):
         lay.addLayout(hlay)
         self.setLayout(lay)
 
-# ========== 登录弹窗【原样保留】 ==========
+# ========== 登录弹窗 ==========
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.setFixedSize(320, 160)
+        self.setFixedSize(320,160)
         lay = QVBoxLayout()
         lay.addWidget(QLabel("Server IP"))
         self.ip_edit = QLineEdit("127.0.0.1")
@@ -326,32 +310,36 @@ class LoginDialog(QDialog):
         QMessageBox.critical(self, "Error", f"{err}")
         self.connect_btn.setEnabled(True)
 
-# ========== 主聊天窗口 ==========
+# ========== 主窗口（ScrollArea + VBoxLayout 方案） ==========
 class ChatMainWindow(QMainWindow):
     def __init__(self, host, nick, tcp):
         super().__init__()
         self.setWindowTitle(f"ChatRoom - {nick}")
-        self.setGeometry(100, 100, 680, 520)
+        self.setGeometry(100,100,680,520)
         self.nick = nick
         self.tcp = tcp
         self.ms_window = None
-        self._last_width = 0
 
         central = QWidget()
         self.setCentralWidget(central)
-        vl = QVBoxLayout(central)
+        vl_main = QVBoxLayout(central)
+        vl_main.setContentsMargins(6,6,6,6)
+        vl_main.setSpacing(6)
 
-        self.msg_list = QListWidget()
-        self.msg_list.setSpacing(4)
-        self.msg_list.setStyleSheet("""
-            QListWidget{background:transparent;border:none;}
-            QListWidget::item{background:transparent;}
-            QListWidget::item:selected{background:transparent;}
-        """)
-        self.msg_list.setResizeMode(QListView.ResizeMode.Adjust)
-        self.msg_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        vl.addWidget(self.msg_list)
+        # 滚动区域
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("border:none;")
+        self.scroll_container = QWidget()
+        self.msg_layout = QVBoxLayout(self.scroll_container)
+        self.msg_layout.setContentsMargins(0,0,0,0)
+        self.msg_layout.setSpacing(4)
+        # 末尾拉伸，消息向上堆叠
+        self.msg_layout.addStretch(1)
+        self.scroll_area.setWidget(self.scroll_container)
+        vl_main.addWidget(self.scroll_area)
 
+        # 按钮行
         btn_layout = QHBoxLayout()
         self.btn_file = QPushButton("Send File")
         self.btn_vid = QPushButton("Start Video Call")
@@ -359,15 +347,16 @@ class ChatMainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_file)
         btn_layout.addWidget(self.btn_vid)
         btn_layout.addWidget(self.btn_ms)
-        vl.addLayout(btn_layout)
+        vl_main.addLayout(btn_layout)
 
+        # 输入行
         input_layout = QHBoxLayout()
         self.msg_input = QLineEdit()
         self.msg_input.setPlaceholderText("Input message...")
         self.btn_send = QPushButton("Send")
         input_layout.addWidget(self.msg_input)
         input_layout.addWidget(self.btn_send)
-        vl.addLayout(input_layout)
+        vl_main.addLayout(input_layout)
 
         # 信号绑定
         self.tcp.msg_signal.connect(self.on_recv_msg)
@@ -379,49 +368,36 @@ class ChatMainWindow(QMainWindow):
         self.btn_vid.clicked.connect(self.video_invite)
         self.btn_file.clicked.connect(self.send_file)
 
-    def update_bubbles_width(self):
-        view_width = self.msg_list.viewport().width()
-        max_bubble_w = int(view_width * 0.8)
-        for i in range(self.msg_list.count()):
-            item = self.msg_list.item(i)
-            widget = self.msg_list.itemWidget(item)
-            if isinstance(widget, MsgBubbleWidget):
-                widget.set_bubble_max_width(max_bubble_w)
-                item.setSizeHint(widget.sizeHint())
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        curr_w = self.msg_list.viewport().width()
-        if self._last_width == curr_w:
-            return
-        self._last_width = curr_w
-        self.update_bubbles_width()
+        view_width = self.scroll_area.viewport().width()
+        max_w = int(view_width * 0.8)
+        # 遍历所有气泡，更新最大宽度
+        for w in self.scroll_container.findChildren(MsgBubbleWidget):
+            w.set_bubble_max_width(max_w)
 
-    def add_bubble(self, widget, max_w):
-        widget.set_bubble_max_width(max_w)
-        item = QListWidgetItem()
-        item.setSizeHint(widget.sizeHint())
-        self.msg_list.addItem(item)
-        self.msg_list.setItemWidget(item, widget)
-        self.msg_list.scrollToBottom()
+    def add_bubble(self, bubble_widget):
+        view_width = self.scroll_area.viewport().width()
+        max_w = int(view_width * 0.8)
+        bubble_widget.set_bubble_max_width(max_w)
+        # 在 stretch 前面插入消息
+        self.msg_layout.insertWidget(self.msg_layout.count()-1, bubble_widget)
+        # 滚动到底部
+        self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
 
     def send_msg(self):
         txt = self.msg_input.text().strip()
         if not txt:
             return
-        view_width = self.msg_list.viewport().width()
-        max_bubble_w = int(view_width * 0.8)
         bubble = MsgBubbleWidget("self", self.nick, txt)
-        self.add_bubble(bubble, max_bubble_w)
+        self.add_bubble(bubble)
         self.tcp.send_text(txt)
         self.msg_input.clear()
 
     def on_recv_msg(self, txt):
-        view_width = self.msg_list.viewport().width()
-        max_bubble_w = int(view_width * 0.8)
         if "joined" in txt or "left" in txt:
             bubble = MsgBubbleWidget("sys", "", txt)
-            self.add_bubble(bubble, max_bubble_w)
+            self.add_bubble(bubble)
         else:
             if txt.startswith("【") and "】：" in txt:
                 idx = txt.index("】：")
@@ -431,7 +407,7 @@ class ChatMainWindow(QMainWindow):
                 sender_nick = ""
                 content = txt
             bubble = MsgBubbleWidget("other", sender_nick, content)
-            self.add_bubble(bubble, max_bubble_w)
+            self.add_bubble(bubble)
 
     def invite_minesweeper(self):
         self.tcp.send_ms_cmd({"cmd": "invite"})
@@ -439,7 +415,8 @@ class ChatMainWindow(QMainWindow):
     def on_ms_event(self, d):
         cmd = d.get("cmd")
         if cmd == "invite":
-            ret = QMessageBox.question(self, "Minesweeper Invite", f"{d['inviter']} invites you to minesweeper, accept?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            ret = QMessageBox.question(self, "Minesweeper Invite", f"{d['inviter']} invites you to minesweeper?",
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if ret == QMessageBox.StandardButton.Yes:
                 self.tcp.send_ms_cmd({"cmd": "accept"})
         elif cmd == "start":
@@ -455,7 +432,7 @@ class ChatMainWindow(QMainWindow):
                 self.ms_window.close()
                 self.ms_window = None
         elif cmd == "win":
-            QMessageBox.information(self, "Win", "All mines cleared!")
+            QMessageBox.information(self, "Win", "All mines cleared, you win!")
             if self.ms_window:
                 self.ms_window.close()
                 self.ms_window = None
@@ -464,9 +441,9 @@ class ChatMainWindow(QMainWindow):
         elif cmd == "abort":
             QMessageBox.information(self, "Game aborted", d.get("msg", ""))
         elif cmd == "busy":
-            QMessageBox.warning(self, "Warning", "Minesweeper room busy!")
+            QMessageBox.warning(self, "Warning", "Room busy")
         elif cmd == "full":
-            QMessageBox.warning(self, "Warning", "Room full!")
+            QMessageBox.warning(self, "Warning", "Room full")
 
     def video_invite(self):
         dlg = VideoInvitePopup(self)
@@ -478,10 +455,8 @@ class ChatMainWindow(QMainWindow):
             QMessageBox.information(self, "Tip", "File transfer function not implemented yet")
 
     def on_disconnect(self):
-        view_width = self.msg_list.viewport().width()
-        max_bubble_w = int(view_width * 0.8)
         bubble = MsgBubbleWidget("sys", "", "Disconnected from server")
-        self.add_bubble(bubble, max_bubble_w)
+        self.add_bubble(bubble)
 
     def closeEvent(self, event):
         self.tcp.close_conn()
@@ -493,5 +468,4 @@ if __name__ == "__main__":
     if login.exec():
         win = ChatMainWindow(login.host, login.nickname, login.tcp_thread)
         win.show()
-        win.update_bubbles_width()
         sys.exit(app.exec())

@@ -18,8 +18,7 @@ def unpack_header(h):
     return struct.unpack(">HIH", h)
 
 
-# ========== 聊天气泡组件【思路二修复：强制重排 + 中文不乱码】 ==========
-# ========== 聊天气泡组件【修复：窗口缩放双向自适应重排】 ==========
+# ========== 聊天气泡组件 ==========
 class MsgBubbleWidget(QWidget):
     def __init__(self, msg_type, nick, text, initial_max_w=0):
         super().__init__()
@@ -27,7 +26,7 @@ class MsgBubbleWidget(QWidget):
         self.nick = nick
         self.raw_text = text
         self.max_bubble_width = initial_max_w
-        self.indent_size = 36
+        self.indent_size = 20
 
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self.main_layout = QHBoxLayout()
@@ -41,7 +40,6 @@ class MsgBubbleWidget(QWidget):
         self.bubble_container = None
 
         if self.msg_type == "self":
-            # 自己消息靠右
             self.main_layout.addStretch(1)
             self.bubble_container = QWidget()
             self.bubble_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -52,22 +50,21 @@ class MsgBubbleWidget(QWidget):
                 padding:6px;
             """)
             bubble_layout = QVBoxLayout(self.bubble_container)
-            bubble_layout.setContentsMargins(0,0,0,0)
+            bubble_layout.setContentsMargins(0, 0, 0, 0)
             bubble_layout.setSpacing(0)
 
             self.text_label = QLabel()
             self.text_label.setFont(self.font)
             self.text_label.setWordWrap(True)
-            self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             self.text_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             self.text_label.setStyleSheet("background:transparent;border:none;")
             bubble_layout.addWidget(self.text_label)
             self.main_layout.addWidget(self.bubble_container)
 
         elif self.msg_type == "other":
-            # 对方消息，昵称在上
             outer_vbox = QVBoxLayout()
-            outer_vbox.setContentsMargins(0,0,0,0)
+            outer_vbox.setContentsMargins(0, 0, 0, 0)
             outer_vbox.setSpacing(3)
 
             nick_label = QLabel(self.nick)
@@ -76,7 +73,7 @@ class MsgBubbleWidget(QWidget):
             outer_vbox.addWidget(nick_label)
 
             bubble_hbox = QHBoxLayout()
-            bubble_hbox.setContentsMargins(0,0,0,0)
+            bubble_hbox.setContentsMargins(0, 0, 0, 0)
             bubble_hbox.setSpacing(0)
             indent_widget = QWidget()
             indent_widget.setFixedWidth(self.indent_size)
@@ -91,13 +88,13 @@ class MsgBubbleWidget(QWidget):
                 padding:6px;
             """)
             bubble_layout = QVBoxLayout(self.bubble_container)
-            bubble_layout.setContentsMargins(0,0,0,0)
+            bubble_layout.setContentsMargins(0, 0, 0, 0)
             bubble_layout.setSpacing(0)
 
             self.text_label = QLabel()
             self.text_label.setFont(self.font)
             self.text_label.setWordWrap(True)
-            self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             self.text_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             self.text_label.setStyleSheet("background:transparent;border:none;")
             bubble_layout.addWidget(self.text_label)
@@ -130,17 +127,30 @@ class MsgBubbleWidget(QWidget):
         if self.bubble_container is not None:
             self.bubble_container.setMaximumWidth(avail_w)
             if self.text_label is not None:
-                # 核心修复：强制label用当前最大宽度重新换行
-                self.text_label.setMaximumWidth(avail_w)
-                # 强制重新计算文本尺寸
-                self.text_label.adjustSize()
-                # 恢复label无上限，宽度由外层bubble容器控制
-                self.text_label.setMaximumWidth(16777215)
+                fm = self.fontMetrics()
+                text_single_width = fm.horizontalAdvance(self.raw_text)
+                label_avail_w = max(avail_w - 12, 20)
+
+                if text_single_width <= label_avail_w:
+                    self.text_label.setMinimumWidth(0)
+                    self.text_label.setMaximumWidth(16777215)
+                else:
+                    self.text_label.setFixedWidth(label_avail_w)
+
+                self.text_label.updateGeometry()
             self.bubble_container.adjustSize()
             self.adjustSize()
 
+    def sizeHint(self):
+        hint = super().sizeHint()
+        if self.text_label:
+            label_hint = self.text_label.sizeHint()
+            hint.setWidth(label_hint.width())
+            hint.setHeight(label_hint.height())
+        return hint
 
-# ========== 网络线程【修复：长连接发送，不再每次新建socket】 ==========
+
+# ========== 网络线程 ==========
 class TcpClientThread(QThread):
     msg_signal = pyqtSignal(str)
     ms_signal = pyqtSignal(dict)
@@ -161,7 +171,6 @@ class TcpClientThread(QThread):
             import socket
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((self.host, self.port))
-            # 昵称发送强制utf-8
             self.sock.sendall((self.nick + "\n").encode("utf-8"))
             self.connected_signal.emit()
             buf = b""
@@ -175,10 +184,9 @@ class TcpClientThread(QThread):
                     mt, pl, _ = unpack_header(hdr)
                     if len(buf) < 8 + pl:
                         break
-                    payload = buf[8:8+pl]
-                    buf = buf[8+pl:]
+                    payload = buf[8:8 + pl]
+                    buf = buf[8 + pl:]
                     if mt == 0:
-                        # 强制utf-8解码，遇到错误用replace避免方框乱码
                         text = payload.decode("utf-8", errors="replace")
                         self.msg_signal.emit(text)
                     elif mt == 4:
@@ -247,18 +255,18 @@ class MinesweeperWindow(QDialog):
         for x in range(self.rows):
             for y in range(self.cols):
                 btn = QPushButton("")
-                btn.setFixedSize(32,32)
-                f = QFont("Arial",12)
+                btn.setFixedSize(32, 32)
+                f = QFont("Arial", 12)
                 f.setBold(True)
                 btn.setFont(f)
                 btn.clicked.connect(lambda ch, xx=x, yy=y: self.on_click(xx, yy, "open"))
-                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.setContextMenuPolicy(Qt.CustomContextMenu)
                 btn.customContextMenuRequested.connect(lambda pos, xx=x, yy=y: self.on_click(xx, yy, "flag"))
                 self.grid_layout.addWidget(btn, x, y)
-                self.buttons[(x,y)] = btn
+                self.buttons[(x, y)] = btn
 
     def on_click(self, x, y, action):
-        self.tcp.send_json({"cmd":"click","x":x,"y":y,"action":action})
+        self.tcp.send_json({"cmd": "click", "x": x, "y": y, "action": action})
 
     def update_board(self, cells, current, players):
         self.current_player = current
@@ -268,7 +276,7 @@ class MinesweeperWindow(QDialog):
         for x in range(self.rows):
             for y in range(self.cols):
                 val = cells[x][y]
-                btn = self.buttons[(x,y)]
+                btn = self.buttons[(x, y)]
                 if val == "c":
                     btn.setText("")
                     btn.setStyleSheet("background:#cfcfcf; border:1px solid #bbb;")
@@ -287,9 +295,9 @@ class MinesweeperWindow(QDialog):
 class VideoInvitePopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setWindowOpacity(0.75)
-        self.setFixedSize(280,140)
+        self.setFixedSize(280, 140)
         lay = QVBoxLayout()
         lay.addWidget(QLabel("Incoming Video Call"))
         hlay = QHBoxLayout()
@@ -308,7 +316,7 @@ class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.setFixedSize(320,160)
+        self.setFixedSize(320, 160)
         lay = QVBoxLayout()
         lay.addWidget(QLabel("Server IP"))
         self.ip_edit = QLineEdit("127.0.0.1")
@@ -346,8 +354,9 @@ class LoginDialog(QDialog):
 class ChatMainWindow(QMainWindow):
     def __init__(self, host, nick, tcp):
         super().__init__()
+        self.resize_timer = None
         self.setWindowTitle(f"ChatRoom - {nick}")
-        self.setGeometry(100,100,680,520)
+        self.setGeometry(100, 100, 680, 520)
         self.nick = nick
         self.tcp = tcp
         self.ms_window = None
@@ -355,22 +364,20 @@ class ChatMainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         vl_main = QVBoxLayout(central)
-        vl_main.setContentsMargins(6,6,6,6)
+        vl_main.setContentsMargins(6, 6, 6, 6)
         vl_main.setSpacing(6)
 
-        # 滚动聊天区域
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("border:none;")
         self.scroll_container = QWidget()
         self.msg_layout = QVBoxLayout(self.scroll_container)
-        self.msg_layout.setContentsMargins(0,0,0,0)
+        self.msg_layout.setContentsMargins(0, 0, 0, 0)
         self.msg_layout.setSpacing(4)
         self.msg_layout.addStretch(1)
         self.scroll_area.setWidget(self.scroll_container)
         vl_main.addWidget(self.scroll_area)
 
-        # 功能按钮行
         btn_layout = QHBoxLayout()
         self.btn_file = QPushButton("Send File")
         self.btn_video = QPushButton("Start Video Call")
@@ -380,7 +387,6 @@ class ChatMainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_ms)
         vl_main.addLayout(btn_layout)
 
-        # 输入框行
         input_layout = QHBoxLayout()
         self.msg_input = QLineEdit()
         self.msg_input.setPlaceholderText("Input message...")
@@ -389,7 +395,6 @@ class ChatMainWindow(QMainWindow):
         input_layout.addWidget(self.btn_send)
         vl_main.addLayout(input_layout)
 
-        # 信号绑定
         self.tcp.msg_signal.connect(self.on_recv_msg)
         self.tcp.ms_signal.connect(self.on_ms_event)
         self.tcp.disconnect_signal.connect(self.on_disconnect)
@@ -401,18 +406,25 @@ class ChatMainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        view_width = self.scroll_area.viewport().width()
-        max_w = int(view_width * 0.7)
-        # 遍历所有气泡更新上限并触发重排
-        for bubble in self.scroll_container.findChildren(MsgBubbleWidget):
-            bubble.set_bubble_max_width(max_w)
-        self.scroll_container.adjustSize()
+        if self.resize_timer is not None:
+            self.killTimer(self.resize_timer)
+        self.resize_timer = self.startTimer(80)
+
+    def timerEvent(self, event):
+        if event.timerId() == self.resize_timer:
+            self.killTimer(self.resize_timer)
+            self.resize_timer = None
+            view_width = self.scroll_area.viewport().width()
+            max_w = int(view_width * 0.8)
+            for bubble in self.scroll_container.findChildren(MsgBubbleWidget):
+                bubble.set_bubble_max_width(max_w)
+            self.scroll_container.adjustSize()
 
     def add_bubble(self, bubble_widget):
         view_width = self.scroll_area.viewport().width()
-        max_w = int(view_width * 0.7)
+        max_w = int(view_width * 0.8)
         bubble_widget.set_bubble_max_width(max_w)
-        self.msg_layout.insertWidget(self.msg_layout.count()-1, bubble_widget)
+        self.msg_layout.insertWidget(self.msg_layout.count() - 1, bubble_widget)
         self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
 
     def send_msg(self):
@@ -432,7 +444,7 @@ class ChatMainWindow(QMainWindow):
             if txt.startswith("【") and "】：" in txt:
                 idx = txt.index("】：")
                 sender_nick = txt[1:idx]
-                content = txt[idx+2:]
+                content = txt[idx + 2:]
             else:
                 sender_nick = ""
                 content = txt
@@ -448,9 +460,10 @@ class ChatMainWindow(QMainWindow):
     def on_ms_event(self, d):
         cmd = d.get("cmd")
         if cmd == "invite":
-            ret = QMessageBox.question(self, "Invite", f"{d['inviter']} invites you to minesweeper?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if ret == QMessageBox.StandardButton.Yes:
-                self.tcp.send_json({"cmd":"accept_invite"})
+            ret = QMessageBox.question(self, "Invite", f"{d['inviter']} invites you to minesweeper?",
+                                       QMessageBox.Yes | QMessageBox.No)
+            if ret == QMessageBox.Yes:
+                self.tcp.send_json({"cmd": "accept_invite"})
         elif cmd == "start":
             self.ms_window = MinesweeperWindow(self, self.tcp, self.nick)
             self.ms_window.build_grid()

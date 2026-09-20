@@ -9,18 +9,15 @@ from PyQt6.QtWidgets import (
     QListView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QTextDocument, QTextOption
-
+from PyQt6.QtGui import QFont
 
 def pack_msg(msg_type, payload):
     return struct.pack(">HIH", msg_type, len(payload), 0) + payload
 
-
 def unpack_header(h):
     return struct.unpack(">HIH", h)
 
-
-# ========== 聊天气泡组件【已修改，方案A QLabel+setWordWrap】 ==========
+# ========== 聊天气泡组件【修复：留白、自动换行、对齐问题】 ==========
 class MsgBubbleWidget(QWidget):
     def __init__(self, msg_type, nick, text):
         super().__init__()
@@ -28,13 +25,14 @@ class MsgBubbleWidget(QWidget):
         self.nick = nick
         self.raw_text = text
         self.bubble_max_width = 0
-        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
         self.font = QFont()
         self.font.setPointSize(10)
         self.init_ui()
 
     def init_ui(self):
         if self.msg_type == "self":
+            # 自己消息：气泡靠右
             self.layout = QHBoxLayout()
             self.layout.setContentsMargins(0, 2, 0, 2)
             self.layout.setSpacing(0)
@@ -46,15 +44,20 @@ class MsgBubbleWidget(QWidget):
             self.bubble_label = QLabel()
             self.bubble_label.setFont(self.font)
             self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.bubble_label.setWordWrap(True)
             self.bubble_label.setStyleSheet("background-color:#ffffff; border:1px solid #cccccc; border-radius:8px;")
             self.text_layout.addWidget(self.bubble_label)
             self.layout.addWidget(self.text_container)
             self.setLayout(self.layout)
 
         elif self.msg_type == "other":
-            self.layout = QVBoxLayout()
+            # 别人消息：气泡靠左，空白在右侧，消除左侧留白
+            self.layout = QHBoxLayout()
             self.layout.setContentsMargins(0, 2, 0, 2)
-            self.layout.setSpacing(3)
+            self.layout.setSpacing(0)
+            bubble_col = QVBoxLayout()
+            bubble_col.setContentsMargins(0,0,0,0)
+            bubble_col.setSpacing(3)
             lb_nick = QLabel(self.nick)
             lb_nick.setFont(self.font)
             lb_nick.setStyleSheet("background:transparent; border:none;")
@@ -66,17 +69,23 @@ class MsgBubbleWidget(QWidget):
             self.bubble_label = QLabel()
             self.bubble_label.setFont(self.font)
             self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.bubble_label.setWordWrap(True)
             self.bubble_label.setStyleSheet("background-color:#f1f1f1; border:1px solid #dddddd; border-radius:8px;")
             self.text_layout.addWidget(self.bubble_label)
-            self.layout.addWidget(lb_nick)
-            self.layout.addWidget(self.text_container)
+            bubble_col.addWidget(lb_nick)
+            bubble_col.addWidget(self.text_container)
+            self.layout.addLayout(bubble_col)
+            self.layout.addStretch(1)
             self.setLayout(self.layout)
+
         else:
+            # 系统消息
             self.layout = QHBoxLayout()
             self.layout.setContentsMargins(0, 2, 0, 2)
             self.bubble_label = QLabel()
             self.bubble_label.setFont(self.font)
             self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.bubble_label.setWordWrap(True)
             self.bubble_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.bubble_label.setStyleSheet("color:#666; background:transparent; border:none;")
             self.layout.addWidget(self.bubble_label)
@@ -84,33 +93,11 @@ class MsgBubbleWidget(QWidget):
 
     def set_bubble_max_width(self, w):
         self.bubble_max_width = w
-        doc = QTextDocument()
-        doc.setDefaultFont(self.font)
-        opt = QTextOption()
-        opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-        doc.setDefaultTextOption(opt)
-        doc.setPlainText(self.raw_text)
-        doc.setTextWidth(w)
-        text_size = doc.size()
-        label_h = int(text_size.height())
-        real_text_width = int(text_size.width())
-
-        if real_text_width <= w:
-            label_w = real_text_width
-            self.bubble_label.setWordWrap(False)
-        else:
-            label_w = w
-            self.bubble_label.setWordWrap(True)
-
-        if label_w < 20:
-            label_w = 20
-        self.bubble_label.setFixedHeight(label_h)
-        self.bubble_label.setMaximumWidth(label_w)
+        self.bubble_label.setMaximumWidth(w)
         self.bubble_label.setText(self.raw_text)
         self.bubble_label.adjustSize()
         self.adjustSize()
         self.updateGeometry()
-
 
 # ========== 网络线程【完全原样保留】 ==========
 class TcpClientThread(QThread):
@@ -339,7 +326,7 @@ class LoginDialog(QDialog):
         QMessageBox.critical(self, "Error", f"{err}")
         self.connect_btn.setEnabled(True)
 
-# ========== 主聊天窗口【只删掉 widget.repaint()，其余原样】 ==========
+# ========== 主聊天窗口 ==========
 class ChatMainWindow(QMainWindow):
     def __init__(self, host, nick, tcp):
         super().__init__()
@@ -348,6 +335,7 @@ class ChatMainWindow(QMainWindow):
         self.nick = nick
         self.tcp = tcp
         self.ms_window = None
+        self._last_width = 0
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -400,10 +388,13 @@ class ChatMainWindow(QMainWindow):
             if isinstance(widget, MsgBubbleWidget):
                 widget.set_bubble_max_width(max_bubble_w)
                 item.setSizeHint(widget.sizeHint())
-        self.msg_list.viewport().update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        curr_w = self.msg_list.viewport().width()
+        if self._last_width == curr_w:
+            return
+        self._last_width = curr_w
         self.update_bubbles_width()
 
     def add_bubble(self, widget, max_w):
@@ -495,7 +486,6 @@ class ChatMainWindow(QMainWindow):
     def closeEvent(self, event):
         self.tcp.close_conn()
         event.accept()
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

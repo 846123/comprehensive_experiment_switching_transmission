@@ -48,7 +48,6 @@ class MsgBubbleWidget(QWidget):
 
         elif msg_type == "other":
             # 别人消息：气泡靠左，右边占位拉伸
-            # 气泡容器：开启样式渲染，支持背景圆角
             self.bubble = QWidget()
             self.bubble.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             self.bubble.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
@@ -56,21 +55,23 @@ class MsgBubbleWidget(QWidget):
                 "background-color:#f1f1f1; border:1px solid #dddddd; border-radius:8px; padding:6px;"
             )
 
-            # 气泡内部：昵称+内容 水平布局
+            # 内部布局：零外边距，小间距，紧凑效果
             bubble_layout = QHBoxLayout(self.bubble)
             bubble_layout.setContentsMargins(0, 0, 0, 0)
-            bubble_layout.setSpacing(4)
+            bubble_layout.setSpacing(2)
 
-            # 昵称标签
+            # 昵称标签：透明背景，紧凑宽度
             nick_label = QLabel(f"【{nick}】：")
             nick_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
             nick_label.setFont(font)
+            nick_label.setStyleSheet("background:transparent; border:none;")
 
-            # 内容标签：自动换行，换行后和文本首行对齐
+            # 内容标签：透明背景，自动换行，占满剩余宽度
             content_label = QLabel(text)
             content_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             content_label.setWordWrap(True)
             content_label.setFont(font)
+            content_label.setStyleSheet("background:transparent; border:none;")
 
             bubble_layout.addWidget(nick_label)
             bubble_layout.addWidget(content_label, 1)
@@ -90,7 +91,7 @@ class MsgBubbleWidget(QWidget):
 
         self.setLayout(layout)
 
-    # 动态设置气泡的最大宽度（仅作用于内部气泡，不影响外层控件宽度）
+    # 动态设置气泡的最大宽度
     def set_bubble_max_width(self, max_width):
         if hasattr(self, 'bubble'):
             self.bubble.setMaximumWidth(max_width)
@@ -341,13 +342,13 @@ class ChatMainWindow(QMainWindow):
 
         self.msg_list = QListWidget()
         self.msg_list.setSpacing(4)
-        # 去掉列表项选中高亮，避免干扰气泡视觉
+        # 去掉列表项选中高亮
         self.msg_list.setStyleSheet("""
             QListWidget{background:transparent;border:none;}
             QListWidget::item{background:transparent;}
             QListWidget::item:selected{background:transparent;}
         """)
-        # 视口变化时自动重排所有列表项
+        # 视口变化时自动重排
         self.msg_list.setResizeMode(QListView.ResizeMode.Adjust)
         # 关闭横向滚动条
         self.msg_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -394,7 +395,7 @@ class ChatMainWindow(QMainWindow):
         max_width = int(viewport_width * 0.7)
         max_width = max(120, max_width)
 
-        # 遍历所有消息项：更新气泡宽度 + 列表项高度自适应
+        # 遍历所有消息项同步更新尺寸
         for i in range(self.msg_list.count()):
             item = self.msg_list.item(i)
             widget = self.msg_list.itemWidget(item)

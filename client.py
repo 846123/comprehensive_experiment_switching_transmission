@@ -45,7 +45,6 @@ class MsgBubbleWidget(QWidget):
             self.text_layout.setSpacing(0)
             self.bubble_label = QLabel()
             self.bubble_label.setFont(self.font)
-            self.bubble_label.setWordWrap(True)
             self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
             self.bubble_label.setStyleSheet("background-color:#ffffff; border:1px solid #cccccc; border-radius:8px;")
             self.text_layout.addWidget(self.bubble_label)
@@ -66,7 +65,6 @@ class MsgBubbleWidget(QWidget):
             self.text_layout.setSpacing(0)
             self.bubble_label = QLabel()
             self.bubble_label.setFont(self.font)
-            self.bubble_label.setWordWrap(True)
             self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
             self.bubble_label.setStyleSheet("background-color:#f1f1f1; border:1px solid #dddddd; border-radius:8px;")
             self.text_layout.addWidget(self.bubble_label)
@@ -78,7 +76,6 @@ class MsgBubbleWidget(QWidget):
             self.layout.setContentsMargins(0, 2, 0, 2)
             self.bubble_label = QLabel()
             self.bubble_label.setFont(self.font)
-            self.bubble_label.setWordWrap(True)
             self.bubble_label.setTextFormat(Qt.TextFormat.PlainText)
             self.bubble_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.bubble_label.setStyleSheet("color:#666; background:transparent; border:none;")
@@ -87,30 +84,33 @@ class MsgBubbleWidget(QWidget):
 
     def set_bubble_max_width(self, w):
         self.bubble_max_width = w
-        self.bubble_label.setMaximumWidth(w)
         doc = QTextDocument()
         doc.setDefaultFont(self.font)
         opt = QTextOption()
-        # 中文任意字符换行
         opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         doc.setDefaultTextOption(opt)
         doc.setPlainText(self.raw_text)
         doc.setTextWidth(w)
-        raw_text_width = doc.size().width()
-
-        if raw_text_width <= w:
-            final_width = raw_text_width
-        else:
-            final_width = w
         text_size = doc.size()
-        label_w = int(final_width)
         label_h = int(text_size.height())
+        real_text_width = int(text_size.width())
+
+        if real_text_width <= w:
+            label_w = real_text_width
+            self.bubble_label.setWordWrap(False)
+        else:
+            label_w = w
+            self.bubble_label.setWordWrap(True)
+
         if label_w < 20:
             label_w = 20
-        self.bubble_label.setFixedSize(label_w, label_h)
+        self.bubble_label.setFixedHeight(label_h)
+        self.bubble_label.setMaximumWidth(label_w)
         self.bubble_label.setText(self.raw_text)
+        self.bubble_label.adjustSize()
         self.adjustSize()
         self.updateGeometry()
+
 
 # ========== 网络线程【完全原样保留】 ==========
 class TcpClientThread(QThread):

@@ -17,6 +17,8 @@ def unpack_header(h):
     return struct.unpack(">HIH", h)
 
 # ========== 聊天气泡组件 ==========
+# ========== 聊天气泡组件【仅修改此类，其余代码完全不动】 ==========
+# ========== 聊天气泡组件【仅修改此类，其余代码完全不动】 ==========
 class MsgBubbleWidget(QWidget):
     def __init__(self, msg_type, nick, text):
         super().__init__()
@@ -24,6 +26,7 @@ class MsgBubbleWidget(QWidget):
         self.nick = nick
         self.raw_text = text
         self.max_bubble_width = 0
+        self.indent_size = 36  # 气泡整体外部缩进宽度，可调整
 
         self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
         self.main_layout = QHBoxLayout()
@@ -33,18 +36,20 @@ class MsgBubbleWidget(QWidget):
 
         self.font = QFont()
         self.font.setPointSize(10)
-        self.text_label = None  # 初始化，sys类型保持None
+        self.text_label = None
 
         if self.msg_type == "self":
-            # 自己消息：靠右，前面加拉伸
+            # 自己消息：靠右，无昵称，气泡紧贴文本
             self.main_layout.addStretch(1)
             bubble_container = QWidget()
+            bubble_container.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             bubble_layout = QVBoxLayout(bubble_container)
             bubble_layout.setContentsMargins(6,6,6,6)
             bubble_layout.setSpacing(0)
             self.text_label = QLabel(self.raw_text)
             self.text_label.setFont(self.font)
             self.text_label.setWordWrap(True)
+            self.text_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             self.text_label.setStyleSheet("""
                 background-color:#ffffff;
                 border:1px solid #cccccc;
@@ -54,27 +59,46 @@ class MsgBubbleWidget(QWidget):
             self.main_layout.addWidget(bubble_container)
 
         elif self.msg_type == "other":
-            # 别人消息：靠左，昵称顶格，正文缩进2汉字(约36px)
-            bubble_container = QWidget()
-            bubble_layout = QVBoxLayout(bubble_container)
-            bubble_layout.setContentsMargins(0,0,0,0)
-            bubble_layout.setSpacing(3)
+            # 别人消息：昵称单独一行顶格，下方气泡整体右缩进（缩进在气泡外部，不包进气泡）
+            outer_vbox = QVBoxLayout()
+            outer_vbox.setContentsMargins(0,0,0,0)
+            outer_vbox.setSpacing(3)
+
+            # 昵称标签，顶格靠左
             nick_label = QLabel(self.nick)
             nick_label.setFont(self.font)
             nick_label.setStyleSheet("color:#444444;")
-            self.text_label = QLabel(self.raw_text)
-            self.text_label.setFont(self.font)
-            self.text_label.setWordWrap(True)
-            self.text_label.setStyleSheet("""
+            outer_vbox.addWidget(nick_label)
+
+            # 气泡行：占位空白 + 气泡容器
+            bubble_hbox = QHBoxLayout()
+            bubble_hbox.setContentsMargins(0,0,0,0)
+            bubble_hbox.setSpacing(0)
+            # 固定宽度占位控件，实现外部缩进，无背景，不会被气泡包裹
+            indent_widget = QWidget()
+            indent_widget.setFixedWidth(self.indent_size)
+            bubble_hbox.addWidget(indent_widget)
+
+            # 气泡容器
+            bubble_container = QWidget()
+            bubble_container.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+            bubble_layout = QVBoxLayout(bubble_container)
+            bubble_layout.setContentsMargins(6,6,6,6)
+            bubble_layout.setSpacing(0)
+            bubble_container.setStyleSheet("""
                 background-color:#f1f1f1;
                 border:1px solid #dddddd;
                 border-radius:8px;
-                padding:6px;
             """)
-            self.text_label.setContentsMargins(36,0,0,0) # 2汉字缩进
-            bubble_layout.addWidget(nick_label)
+            self.text_label = QLabel(self.raw_text)
+            self.text_label.setFont(self.font)
+            self.text_label.setWordWrap(True)
+            self.text_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             bubble_layout.addWidget(self.text_label)
-            self.main_layout.addWidget(bubble_container)
+            bubble_hbox.addWidget(bubble_container)
+
+            outer_vbox.addLayout(bubble_hbox)
+            self.main_layout.addLayout(outer_vbox)
             self.main_layout.addStretch(1)
 
         elif self.msg_type == "sys":
@@ -88,9 +112,13 @@ class MsgBubbleWidget(QWidget):
 
     def set_bubble_max_width(self, w):
         self.max_bubble_width = w
-        # 增加判断：只有text_label不为空才设置最大宽度，跳过sys消息
+        if self.msg_type == "other":
+            # 他人消息：最大宽度需要减去外部缩进占位宽度
+            avail_w = w - self.indent_size
+        else:
+            avail_w = w
         if self.msg_type in ("self", "other") and self.text_label is not None:
-            self.text_label.setMaximumWidth(w)
+            self.text_label.setMaximumWidth(avail_w)
 
 # ========== 网络线程 ==========
 class TcpClientThread(QThread):

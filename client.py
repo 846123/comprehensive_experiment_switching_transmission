@@ -1,12 +1,13 @@
 import sys
 import json
 import struct
+import socket
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QDialog, QMessageBox, QFileDialog,
     QGridLayout, QSizePolicy, QScrollArea
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 
 
@@ -168,8 +169,8 @@ class TcpClientThread(QThread):
 
     def run(self):
         try:
-            import socket
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.settimeout(None)
             self.sock.connect((self.host, self.port))
             self.sock.sendall((self.nick + "\n").encode("utf-8"))
             self.connected_signal.emit()
@@ -218,14 +219,250 @@ class TcpClientThread(QThread):
     def close_conn(self):
         self.running = False
         if self.sock:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except:
+                pass
             self.sock.close()
+
+
+# ========== 扫雷邀请弹窗 ==========
+class MinesweeperInviteDialog(QDialog):
+    def __init__(self, parent, inviter, players, my_nick, tcp):
+        super().__init__(parent)
+        self.setWindowTitle("扫雷邀请")
+        self.setFixedSize(320, 380)
+        self.my_nick = my_nick
+        self.tcp = tcp
+        self.time_left = 30
+        self.responses = {n: "pending" for n in players}
+        self.responses[inviter] = "accept"
+        self.has_responded = (my_nick == inviter)
+
+        main_layout = QVBoxLayout()
+        title = QLabel(f"{inviter} 邀请你玩扫雷")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        f = QFont()
+        f.setPointSize(12)
+        f.setBold(True)
+        title.setFont(f)
+        main_layout.addWidget(title)
+
+        self.time_label = QLabel(f"剩余时间: {self.time_left}s")
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.time_label)
+
+        self.player_list_widget = QWidget()
+        self.player_layout = QVBoxLayout(self.player_list_widget)
+        self.player_layout.setContentsMargins(0, 0, 0, 0)
+        self.player_layout.setSpacing(4)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.player_list_widget)
+        main_layout.addWidget(scroll, 1)
+
+        btn_layout = QHBoxLayout()
+        self.btn_accept = QPushButton("接受")
+        self.btn_reject = QPushButton("拒绝")
+        self.btn_accept.clicked.connect(self.on_accept)
+        self.btn_reject.clicked.connect(self.on_reject)
+        btn_layout.addWidget(self.btn_accept)
+        btn_layout.addWidget(self.btn_reject)
+        main_layout.addLayout(btn_layout)
+
+        self.setLayout(main_layout)
+        self.update_player_list()
+
+        if self.has_responded:
+            self.btn_accept.setEnabled(False)
+            self.btn_reject.setEnabled(False)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.on_tick)
+        self.timer.start(1000)
+
+    def update_player_list(self):
+        for i in reversed(range(self.player_layout.count())):
+            item = self.player_layout.itemAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for nick, status in self.responses.items():
+            row = QHBoxLayout()
+            nick_label = QLabel(nick)
+            status_label = QLabel()
+            if status == "accept":
+                status_label.setText("✅ 接受")
+                status_label.setStyleSheet("color: green;")
+            elif status == "reject":
+                status_label.setText("❌ 拒绝")
+                status_label.setStyleSheet("color: red;")
+            else:
+                status_label.setText("⏳ 等待中")
+                status_label.setStyleSheet("color: gray;")
+            row.addWidget(nick_label)
+            row.addStretch(1)
+            row.addWidget(status_label)
+            widget = QWidget()
+            widget.setLayout(row)
+            self.player_layout.addWidget(widget)
+
+    def on_tick(self):
+        self.time_left -= 1
+        self.time_label.setText(f"剩余时间: {self.time_left}s")
+        if self.time_left <= 0:
+            self.timer.stop()
+            if not self.has_responded:
+                self.on_reject()
+
+    def on_accept(self):
+        if self.has_responded:
+            return
+        self.has_responded = True
+        self.btn_accept.setEnabled(False)
+        self.btn_reject.setEnabled(False)
+        self.tcp.send_json({"cmd": "accept"})
+
+    def on_reject(self):
+        if self.has_responded:
+            return
+        self.has_responded = True
+        self.btn_accept.setEnabled(False)
+        self.btn_reject.setEnabled(False)
+        self.tcp.send_json({"cmd": "reject"})
+
+    def update_status(self, responses):
+        self.responses = responses
+        self.update_player_list()
+        if self.my_nick in responses and responses[self.my_nick] != "pending":
+            self.has_responded = True
+            self.btn_accept.setEnabled(False)
+            self.btn_reject.setEnabled(False)
+
+
+# ========== 结算弹窗 ==========
+class GameResultDialog(QDialog):
+    def __init__(self, parent, result, my_nick, tcp):
+        super().__init__(parent)
+        self.setWindowTitle("游戏结束")
+        self.setFixedSize(320, 400)
+        self.my_nick = my_nick
+        self.tcp = tcp
+        self.result = result
+        self.time_left = 30
+        self.responses = {item["nick"]: "pending" for item in result}
+        self.has_responded = False
+
+        main_layout = QVBoxLayout()
+        title = QLabel("游戏结束")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        f = QFont()
+        f.setPointSize(14)
+        f.setBold(True)
+        title.setFont(f)
+        main_layout.addWidget(title)
+
+        self.time_label = QLabel(f"剩余时间: {self.time_left}s")
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.time_label)
+
+        self.rank_widget = QWidget()
+        self.rank_layout = QVBoxLayout(self.rank_widget)
+        self.rank_layout.setContentsMargins(0, 0, 0, 0)
+        self.rank_layout.setSpacing(6)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.rank_widget)
+        main_layout.addWidget(scroll, 1)
+
+        btn_layout = QHBoxLayout()
+        self.btn_rematch = QPushButton("再来一局")
+        self.btn_quit = QPushButton("退出")
+        self.btn_rematch.clicked.connect(self.on_rematch)
+        self.btn_quit.clicked.connect(self.on_quit)
+        btn_layout.addWidget(self.btn_rematch)
+        btn_layout.addWidget(self.btn_quit)
+        main_layout.addLayout(btn_layout)
+
+        self.setLayout(main_layout)
+        self.update_rank_list()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.on_tick)
+        self.timer.start(1000)
+
+    def update_rank_list(self):
+        for i in reversed(range(self.rank_layout.count())):
+            item = self.rank_layout.itemAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for idx, item in enumerate(self.result, 1):
+            nick = item["nick"]
+            score = item["score"]
+            status = self.responses.get(nick, "pending")
+
+            row = QHBoxLayout()
+            rank_label = QLabel(f"{idx}.")
+            rank_label.setFixedWidth(20)
+            nick_label = QLabel(nick)
+            score_label = QLabel(f"{score} 分")
+            status_label = QLabel()
+
+            if status == "accept":
+                status_label.setText("✅")
+            elif status == "reject":
+                status_label.setText("❌")
+            else:
+                status_label.setText("⏳")
+
+            row.addWidget(rank_label)
+            row.addWidget(nick_label, 1)
+            row.addWidget(score_label)
+            row.addWidget(status_label)
+
+            widget = QWidget()
+            widget.setLayout(row)
+            self.rank_layout.addWidget(widget)
+
+    def on_tick(self):
+        self.time_left -= 1
+        self.time_label.setText(f"剩余时间: {self.time_left}s")
+        if self.time_left <= 0:
+            self.timer.stop()
+            if not self.has_responded:
+                self.on_quit()
+
+    def on_rematch(self):
+        if self.has_responded:
+            return
+        self.has_responded = True
+        self.btn_rematch.setEnabled(False)
+        self.btn_quit.setEnabled(False)
+        self.tcp.send_json({"cmd": "rematch_accept"})
+
+    def on_quit(self):
+        if self.has_responded:
+            return
+        self.has_responded = True
+        self.btn_rematch.setEnabled(False)
+        self.btn_quit.setEnabled(False)
+        self.tcp.send_json({"cmd": "rematch_reject"})
+
+    def update_status(self, responses):
+        self.responses = responses
+        self.update_rank_list()
+        if self.my_nick in responses and responses[self.my_nick] != "pending":
+            self.has_responded = True
+            self.btn_rematch.setEnabled(False)
+            self.btn_quit.setEnabled(False)
 
 
 # ========== 扫雷窗口 ==========
 class MinesweeperWindow(QDialog):
     def __init__(self, parent, tcp, my_nick):
         super().__init__(parent)
-        self.setWindowTitle("Minesweeper")
+        self.setWindowTitle("多人扫雷")
         self.tcp = tcp
         self.my_nick = my_nick
         self.rows = 16
@@ -238,8 +475,9 @@ class MinesweeperWindow(QDialog):
     def init_ui(self):
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
-        self.player_label = QLabel("Waiting game...")
+        self.player_label = QLabel("等待游戏开始...")
         left_layout.addWidget(self.player_label)
+        left_layout.addStretch(1)
         grid_widget = QWidget()
         self.grid_layout = QGridLayout(grid_widget)
         self.grid_layout.setSpacing(2)
@@ -260,19 +498,31 @@ class MinesweeperWindow(QDialog):
                 f.setBold(True)
                 btn.setFont(f)
                 btn.clicked.connect(lambda ch, xx=x, yy=y: self.on_click(xx, yy, "open"))
-                btn.setContextMenuPolicy(Qt.CustomContextMenu)
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 btn.customContextMenuRequested.connect(lambda pos, xx=x, yy=y: self.on_click(xx, yy, "flag"))
                 self.grid_layout.addWidget(btn, x, y)
                 self.buttons[(x, y)] = btn
 
     def on_click(self, x, y, action):
+        if self.current_player != self.my_nick:
+            return
         self.tcp.send_json({"cmd": "click", "x": x, "y": y, "action": action})
 
     def update_board(self, cells, current, players):
         self.current_player = current
         self.players = players
-        txt = "Players:\n" + "\n".join([p + (" << YOUR TURN" if p == current else "") for p in players])
-        self.player_label.setText(txt)
+        txt = "玩家列表：\n"
+        for p in players:
+            nick = p["nick"]
+            alive = p["alive"]
+            line = f"{nick}"
+            if not alive:
+                line += " 💀"
+            if nick == current:
+                line += " ◀ 你的回合"
+            txt += line + "\n"
+        self.player_label.setText(txt.strip())
+
         for x in range(self.rows):
             for y in range(self.cols):
                 val = cells[x][y]
@@ -285,17 +535,26 @@ class MinesweeperWindow(QDialog):
                     btn.setText("F")
                     btn.setStyleSheet("background:#ffdddd; color:red; border:1px solid #bbb;")
                     btn.setEnabled(False)
+                elif val == "m":
+                    btn.setText("💣")
+                    btn.setStyleSheet("background:#ff6666; color:white; border:1px solid #bbb;")
+                    btn.setEnabled(False)
                 else:
                     btn.setText(val)
                     btn.setStyleSheet("background:#ffffff; border:1px solid #bbb;")
                     btn.setEnabled(False)
+
+        is_my_turn = (self.current_player == self.my_nick)
+        for btn in self.buttons.values():
+            if btn.isEnabled():
+                btn.setEnabled(is_my_turn)
 
 
 # ========== 视频弹窗 ==========
 class VideoInvitePopup(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowOpacity(0.75)
         self.setFixedSize(280, 140)
         lay = QVBoxLayout()
@@ -315,18 +574,18 @@ class VideoInvitePopup(QDialog):
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Login")
+        self.setWindowTitle("登录")
         self.setFixedSize(320, 160)
         lay = QVBoxLayout()
-        lay.addWidget(QLabel("Server IP"))
+        lay.addWidget(QLabel("服务器地址"))
         self.ip_edit = QLineEdit("127.0.0.1")
         lay.addWidget(self.ip_edit)
-        lay.addWidget(QLabel("Nickname"))
+        lay.addWidget(QLabel("昵称"))
         self.nick_edit = QLineEdit()
         lay.addWidget(self.nick_edit)
         self.status_label = QLabel("")
         lay.addWidget(self.status_label)
-        self.connect_btn = QPushButton("Connect")
+        self.connect_btn = QPushButton("连接")
         self.connect_btn.clicked.connect(self.on_connect)
         lay.addWidget(self.connect_btn)
         self.setLayout(lay)
@@ -338,9 +597,9 @@ class LoginDialog(QDialog):
         ip = self.ip_edit.text().strip()
         nick = self.nick_edit.text().strip()
         if not ip or not nick:
-            QMessageBox.warning(self, "Warning", "Server IP and nickname cannot be empty!")
+            QMessageBox.warning(self, "警告", "服务器地址和昵称不能为空！")
             return
-        self.status_label.setText("Connecting...")
+        self.status_label.setText("连接中...")
         self.connect_btn.setEnabled(False)
         self.host = ip
         self.nickname = nick
@@ -355,11 +614,13 @@ class ChatMainWindow(QMainWindow):
     def __init__(self, host, nick, tcp):
         super().__init__()
         self.resize_timer = None
-        self.setWindowTitle(f"ChatRoom - {nick}")
+        self.setWindowTitle(f"聊天室 - {nick}")
         self.setGeometry(100, 100, 680, 520)
         self.nick = nick
         self.tcp = tcp
         self.ms_window = None
+        self.invite_dialog = None
+        self.result_dialog = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -379,9 +640,9 @@ class ChatMainWindow(QMainWindow):
         vl_main.addWidget(self.scroll_area)
 
         btn_layout = QHBoxLayout()
-        self.btn_file = QPushButton("Send File")
-        self.btn_video = QPushButton("Start Video Call")
-        self.btn_ms = QPushButton("Minesweeper")
+        self.btn_file = QPushButton("发送文件")
+        self.btn_video = QPushButton("发起视频")
+        self.btn_ms = QPushButton("扫雷游戏")
         btn_layout.addWidget(self.btn_file)
         btn_layout.addWidget(self.btn_video)
         btn_layout.addWidget(self.btn_ms)
@@ -389,8 +650,8 @@ class ChatMainWindow(QMainWindow):
 
         input_layout = QHBoxLayout()
         self.msg_input = QLineEdit()
-        self.msg_input.setPlaceholderText("Input message...")
-        self.btn_send = QPushButton("Send")
+        self.msg_input.setPlaceholderText("输入消息...")
+        self.btn_send = QPushButton("发送")
         input_layout.addWidget(self.msg_input)
         input_layout.addWidget(self.btn_send)
         vl_main.addLayout(input_layout)
@@ -452,41 +713,81 @@ class ChatMainWindow(QMainWindow):
             self.add_bubble(bubble)
 
     def open_minesweeper(self):
-        dlg = MinesweeperWindow(self, self.tcp, self.nick)
-        dlg.build_grid()
-        dlg.show()
-        self.ms_window = dlg
+        self.tcp.send_json({"cmd": "invite"})
 
     def on_ms_event(self, d):
         cmd = d.get("cmd")
         if cmd == "invite":
-            ret = QMessageBox.question(self, "Invite", f"{d['inviter']} invites you to minesweeper?",
-                                       QMessageBox.Yes | QMessageBox.No)
-            if ret == QMessageBox.Yes:
-                self.tcp.send_json({"cmd": "accept_invite"})
+            if self.invite_dialog and self.invite_dialog.isVisible():
+                self.invite_dialog.close()
+            self.invite_dialog = MinesweeperInviteDialog(
+                self, d["inviter"], d["players"], self.nick, self.tcp
+            )
+            self.invite_dialog.show()
+
+        elif cmd == "invite_status":
+            if self.invite_dialog and self.invite_dialog.isVisible():
+                self.invite_dialog.update_status(d["responses"])
+
+        elif cmd == "cancel":
+            if self.invite_dialog and self.invite_dialog.isVisible():
+                self.invite_dialog.close()
+            QMessageBox.information(self, "提示", d.get("msg", "邀请已取消"))
+
+        elif cmd == "busy":
+            QMessageBox.warning(self, "提示", "当前已有游戏进行中")
+
+        elif cmd == "full":
+            QMessageBox.warning(self, "提示", "游戏人数已满")
+
         elif cmd == "start":
+            if self.invite_dialog and self.invite_dialog.isVisible():
+                self.invite_dialog.close()
+            if self.result_dialog and self.result_dialog.isVisible():
+                self.result_dialog.close()
             self.ms_window = MinesweeperWindow(self, self.tcp, self.nick)
             self.ms_window.build_grid()
+            # 修复：开局初始化棋盘和玩家状态，让第一个玩家可以操作
+            init_cells = [["c" for _ in range(16)] for _ in range(16)]
+            init_players = [{"nick": p, "alive": True} for p in d["players"]]
+            self.ms_window.update_board(init_cells, d["current"], init_players)
             self.ms_window.show()
+
         elif cmd == "update":
-            if self.ms_window:
+            if self.ms_window and self.ms_window.isVisible():
                 self.ms_window.update_board(d["cells"], d["current"], d["players"])
-        elif cmd == "gameover":
-            QMessageBox.information(self, "Game Over", f"{d['loser']} lost!")
-        elif cmd == "win":
-            QMessageBox.information(self, "Win", "You win!")
+
+        elif cmd == "game_end":
+            if self.ms_window and self.ms_window.isVisible():
+                self.ms_window.close()
+            self.result_dialog = GameResultDialog(self, d["result"], self.nick, self.tcp)
+            self.result_dialog.show()
+
+        elif cmd == "rematch_status":
+            if self.result_dialog and self.result_dialog.isVisible():
+                self.result_dialog.update_status(d["responses"])
+
+        elif cmd == "rematch_cancel":
+            if self.result_dialog and self.result_dialog.isVisible():
+                self.result_dialog.close()
+            QMessageBox.information(self, "提示", d.get("msg", "再来一局取消"))
+
+        elif cmd == "abort":
+            if self.ms_window and self.ms_window.isVisible():
+                self.ms_window.close()
+            QMessageBox.information(self, "提示", d.get("msg", "游戏中止"))
 
     def open_video(self):
         dlg = VideoInvitePopup(self)
         dlg.exec()
 
     def send_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select File")
+        path, _ = QFileDialog.getOpenFileName(self, "选择文件")
         if path:
-            QMessageBox.information(self, "Tip", "File transfer function not implemented yet")
+            QMessageBox.information(self, "提示", "文件传输功能暂未实现")
 
     def on_disconnect(self):
-        bubble = MsgBubbleWidget("sys", "", "Disconnected from server")
+        bubble = MsgBubbleWidget("sys", "", "与服务器断开连接")
         self.add_bubble(bubble)
 
     def closeEvent(self, event):

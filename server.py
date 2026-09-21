@@ -17,18 +17,21 @@ def unpack_header(h):
 MS_ROWS, MS_COLS, MS_MINES = 16, 16, 40
 MS_MAX_PLAYER = 6
 MS_MIN_PLAYER = 2
-MS_WAIT_SEC = 15
+MS_WAIT_SEC = 30  # 倒计时统一30秒
 
 ms_room = {
-    "state": "idle",          # idle / waiting / gaming
+    "state": "idle",          # idle / waiting / gaming / resulting
     "inviter": None,
     "inviter_writer": None,
-    "players": [],            # [{"nick":xxx, "writer":writer}]
+    "players": [],            # [{"nick":xxx, "writer":writer, "alive":bool, "score":int}]
     "countdown_task": None,
     "mine_map": None,
     "cell_number": None,
-    "cell_state": None,       # 0 closed /1 open /2 flag
+    "cell_state": None,       # 0 closed /1 open /2 flag /3 mine opened
     "current_idx": 0,
+    "invite_responses": {},   # nick -> "pending"/"accept"/"reject"
+    "rematch_responses": {},  # nick -> "pending"/"accept"/"reject"
+    "first_click": True,      # 首次点击标记，用于首点不踩雷
 }
 
 def ms_reset():
@@ -43,6 +46,9 @@ def ms_reset():
     ms_room["cell_number"] = None
     ms_room["cell_state"] = None
     ms_room["current_idx"] = 0
+    ms_room["invite_responses"] = {}
+    ms_room["rematch_responses"] = {}
+    ms_room["first_click"] = True
 
 async def broadcast_packet(packet, exclude=None):
     for w in list(clients.keys()):
@@ -63,6 +69,20 @@ async def ms_broadcast(payload_dict, exclude=None):
     payload = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
     pkt = pack_msg(4, payload)
     await broadcast_packet(pkt, exclude)
+
+# 广播邀请响应状态
+async def ms_broadcast_invite_status():
+    await ms_broadcast({
+        "cmd": "invite_status",
+        "responses": ms_room["invite_responses"]
+    })
+
+# 广播再来一局响应状态
+async def ms_broadcast_rematch_status():
+    await ms_broadcast({
+        "cmd": "rematch_status",
+        "responses": ms_room["rematch_responses"]
+    })
 
 def ms_gen_map(sx=None, sy=None):
     r, c = MS_ROWS, MS_COLS
@@ -119,6 +139,24 @@ def ms_check_win():
                 return False
     return True
 
+# 检查是否所有玩家都死亡
+def ms_check_all_dead():
+    for p in ms_room["players"]:
+        if p["alive"]:
+            return False
+    return True
+
+# 切换到下一个存活玩家
+def ms_next_player():
+    n = len(ms_room["players"])
+    start = ms_room["current_idx"]
+    for i in range(1, n+1):
+        idx = (start + i) % n
+        if ms_room["players"][idx]["alive"]:
+            ms_room["current_idx"] = idx
+            return
+    ms_room["current_idx"] = 0
+
 def ms_build_update():
     cells = []
     for x in range(MS_ROWS):
@@ -129,28 +167,86 @@ def ms_build_update():
                 row.append("c")
             elif s ==2:
                 row.append("f")
+            elif s == 3:
+                row.append("m")  # 翻开的地雷
             else:
                 row.append(str(ms_room["cell_number"][x][y]))
         cells.append(row)
+    players_info = [{"nick": p["nick"], "alive": p["alive"]} for p in ms_room["players"]]
     cur = ms_room["players"][ms_room["current_idx"]]["nick"] if ms_room["players"] else None
     return {
         "cmd":"update",
         "cells":cells,
         "current":cur,
-        "players":[p["nick"] for p in ms_room["players"]]
+        "players":players_info
     }
 
+# 邀请倒计时
 async def ms_countdown():
     await asyncio.sleep(MS_WAIT_SEC)
     if ms_room["state"] != "waiting":
         return
-    if len(ms_room["players"]) < MS_MIN_PLAYER:
+    accept_players = [nick for nick, status in ms_room["invite_responses"].items() if status == "accept"]
+    if len(accept_players) < MS_MIN_PLAYER:
         await ms_broadcast({"cmd":"cancel","msg":"Not enough players"})
         ms_reset()
         return
+    # 初始化玩家状态
+    for p in ms_room["players"]:
+        p["alive"] = True
+        p["score"] = 0
     ms_room["state"] = "gaming"
-    ms_gen_map()
+    ms_room["first_click"] = True
     ms_room["current_idx"] = 0
+    await ms_broadcast({
+        "cmd":"start",
+        "rows":MS_ROWS,
+        "cols":MS_COLS,
+        "mine_count":MS_MINES,
+        "players":[p["nick"] for p in ms_room["players"]],
+        "current":ms_room["players"][0]["nick"]
+    })
+
+# 游戏结束进入结算
+async def ms_end_game():
+    ms_room["state"] = "resulting"
+    ranked = sorted(ms_room["players"], key=lambda p: p["score"], reverse=True)
+    result = [{"nick": p["nick"], "score": p["score"]} for p in ranked]
+    await ms_broadcast({
+        "cmd": "game_end",
+        "result": result
+    })
+    ms_room["rematch_responses"] = {p["nick"]: "pending" for p in ms_room["players"]}
+    ms_room["countdown_task"] = asyncio.create_task(ms_rematch_countdown())
+
+# 再来一局倒计时
+async def ms_rematch_countdown():
+    await asyncio.sleep(MS_WAIT_SEC)
+    if ms_room["state"] != "resulting":
+        return
+    accept_nicks = [nick for nick, status in ms_room["rematch_responses"].items() if status == "accept"]
+    if len(accept_nicks) < MS_MIN_PLAYER:
+        await ms_broadcast({"cmd": "rematch_cancel", "msg": "Not enough players for rematch"})
+        ms_reset()
+        return
+    # 按上一局得分排名排序
+    ranked = sorted(ms_room["players"], key=lambda p: p["score"], reverse=True)
+    new_players = []
+    for p in ranked:
+        if p["nick"] in accept_nicks:
+            new_players.append({
+                "nick": p["nick"],
+                "writer": p["writer"],
+                "alive": True,
+                "score": 0
+            })
+    ms_room["players"] = new_players
+    ms_room["state"] = "gaming"
+    ms_room["first_click"] = True
+    ms_room["current_idx"] = 0
+    ms_room["mine_map"] = None
+    ms_room["cell_number"] = None
+    ms_room["cell_state"] = None
     await ms_broadcast({
         "cmd":"start",
         "rows":MS_ROWS,
@@ -169,33 +265,91 @@ async def handle_ms_cmd(data, nick, writer):
         ms_room["state"] = "waiting"
         ms_room["inviter"] = nick
         ms_room["inviter_writer"] = writer
-        ms_room["players"] = [{"nick":nick,"writer":writer}]
+        all_nicks = list(clients.values())
+        ms_room["invite_responses"] = {n: "pending" for n in all_nicks}
+        ms_room["invite_responses"][nick] = "accept"
+        ms_room["players"] = [{"nick": nick, "writer": writer, "alive": False, "score": 0}]
         ms_room["countdown_task"] = asyncio.create_task(ms_countdown())
         await ms_broadcast({
             "cmd":"invite",
             "inviter":nick,
             "max":MS_MAX_PLAYER,
-            "min":MS_MIN_PLAYER
+            "min":MS_MIN_PLAYER,
+            "players": all_nicks
         })
+
     elif cmd == "accept":
         if ms_room["state"] != "waiting":
             return
-        if any(p["nick"] == nick for p in ms_room["players"]):
+        if ms_room["invite_responses"].get(nick) != "pending":
             return
         if len(ms_room["players"]) >= MS_MAX_PLAYER:
             await ms_broadcast({"cmd":"full"})
             return
-        ms_room["players"].append({"nick":nick,"writer":writer})
-        await ms_broadcast({
-            "cmd":"join",
-            "player":nick,
-            "players":[p["nick"] for p in ms_room["players"]],
-            "count":len(ms_room["players"])
-        })
+        ms_room["invite_responses"][nick] = "accept"
+        ms_room["players"].append({"nick": nick, "writer": writer, "alive": False, "score": 0})
+        await ms_broadcast_invite_status()
+        # 全员响应则提前结束倒计时
+        if all(s != "pending" for s in ms_room["invite_responses"].values()):
+            if ms_room["countdown_task"]:
+                ms_room["countdown_task"].cancel()
+                ms_room["countdown_task"] = None
+            accept_players = [n for n, s in ms_room["invite_responses"].items() if s == "accept"]
+            if len(accept_players) < MS_MIN_PLAYER:
+                await ms_broadcast({"cmd":"cancel","msg":"Not enough players"})
+                ms_reset()
+                return
+            for p in ms_room["players"]:
+                p["alive"] = True
+                p["score"] = 0
+            ms_room["state"] = "gaming"
+            ms_room["first_click"] = True
+            ms_room["current_idx"] = 0
+            await ms_broadcast({
+                "cmd":"start",
+                "rows":MS_ROWS,
+                "cols":MS_COLS,
+                "mine_count":MS_MINES,
+                "players":[p["nick"] for p in ms_room["players"]],
+                "current":ms_room["players"][0]["nick"]
+            })
+
+    elif cmd == "reject":
+        if ms_room["state"] != "waiting":
+            return
+        if ms_room["invite_responses"].get(nick) != "pending":
+            return
+        ms_room["invite_responses"][nick] = "reject"
+        await ms_broadcast_invite_status()
+        if all(s != "pending" for s in ms_room["invite_responses"].values()):
+            if ms_room["countdown_task"]:
+                ms_room["countdown_task"].cancel()
+                ms_room["countdown_task"] = None
+            accept_players = [n for n, s in ms_room["invite_responses"].items() if s == "accept"]
+            if len(accept_players) < MS_MIN_PLAYER:
+                await ms_broadcast({"cmd":"cancel","msg":"Not enough players"})
+                ms_reset()
+                return
+            for p in ms_room["players"]:
+                p["alive"] = True
+                p["score"] = 0
+            ms_room["state"] = "gaming"
+            ms_room["first_click"] = True
+            ms_room["current_idx"] = 0
+            await ms_broadcast({
+                "cmd":"start",
+                "rows":MS_ROWS,
+                "cols":MS_COLS,
+                "mine_count":MS_MINES,
+                "players":[p["nick"] for p in ms_room["players"]],
+                "current":ms_room["players"][0]["nick"]
+            })
+
     elif cmd == "cancel":
         if ms_room["state"] == "waiting" and ms_room["inviter_writer"] == writer:
             await ms_broadcast({"cmd":"cancel","msg":"Inviter cancelled"})
             ms_reset()
+
     elif cmd == "click":
         if ms_room["state"] != "gaming":
             return
@@ -207,26 +361,129 @@ async def handle_ms_cmd(data, nick, writer):
         action = data.get("action")
         if not (isinstance(x,int) and isinstance(y,int) and 0<=x<MS_ROWS and 0<=y<MS_COLS):
             return
+
+        # 首次操作生成地图，首点及周围无雷
+        if ms_room["first_click"]:
+            ms_gen_map(x, y)
+            ms_room["first_click"] = False
+
         if action == "flag":
-            if ms_room["cell_state"][x][y] ==0:
-                ms_room["cell_state"][x][y] =2
-            elif ms_room["cell_state"][x][y]==2:
-                ms_room["cell_state"][x][y]=0
-        elif action == "open":
-            if ms_room["cell_state"][x][y] in (1,2):
+            # 仅未翻开未插旗可插，不可取消
+            if ms_room["cell_state"][x][y] != 0:
                 return
+            ms_room["cell_state"][x][y] = 2
+            # 计分：正确+1，错误-1
             if ms_room["mine_map"][x][y]:
-                mines = [[mx,my] for mx in range(MS_ROWS) for my in range(MS_COLS) if ms_room["mine_map"][mx][my]]
-                await ms_broadcast({"cmd":"gameover","loser":nick,"mines":mines})
-                ms_reset()
+                cur_player["score"] += 1
+            else:
+                cur_player["score"] -= 1
+            ms_next_player()
+
+        elif action == "open":
+            if ms_room["cell_state"][x][y] in (1, 2, 3):
                 return
-            ms_expand(x,y)
-            if ms_check_win():
-                await ms_broadcast({"cmd":"win"})
-                ms_reset()
-                return
-            ms_room["current_idx"] = (ms_room["current_idx"]+1) % len(ms_room["players"])
+            # 踩雷：仅当前雷显示，玩家死亡
+            if ms_room["mine_map"][x][y]:
+                ms_room["cell_state"][x][y] = 3
+                cur_player["alive"] = False
+                if ms_check_all_dead():
+                    await ms_broadcast(ms_build_update())
+                    await ms_end_game()
+                    return
+                ms_next_player()
+            else:
+                ms_expand(x, y)
+                if ms_check_win():
+                    await ms_broadcast(ms_build_update())
+                    await ms_end_game()
+                    return
+                ms_next_player()
+
         await ms_broadcast(ms_build_update())
+
+    elif cmd == "rematch_accept":
+        if ms_room["state"] != "resulting":
+            return
+        if ms_room["rematch_responses"].get(nick) != "pending":
+            return
+        ms_room["rematch_responses"][nick] = "accept"
+        await ms_broadcast_rematch_status()
+        if all(s != "pending" for s in ms_room["rematch_responses"].values()):
+            if ms_room["countdown_task"]:
+                ms_room["countdown_task"].cancel()
+                ms_room["countdown_task"] = None
+            accept_nicks = [n for n, s in ms_room["rematch_responses"].items() if s == "accept"]
+            if len(accept_nicks) < MS_MIN_PLAYER:
+                await ms_broadcast({"cmd": "rematch_cancel", "msg": "Not enough players for rematch"})
+                ms_reset()
+                return
+            ranked = sorted(ms_room["players"], key=lambda p: p["score"], reverse=True)
+            new_players = []
+            for p in ranked:
+                if p["nick"] in accept_nicks:
+                    new_players.append({
+                        "nick": p["nick"],
+                        "writer": p["writer"],
+                        "alive": True,
+                        "score": 0
+                    })
+            ms_room["players"] = new_players
+            ms_room["state"] = "gaming"
+            ms_room["first_click"] = True
+            ms_room["current_idx"] = 0
+            ms_room["mine_map"] = None
+            ms_room["cell_number"] = None
+            ms_room["cell_state"] = None
+            await ms_broadcast({
+                "cmd":"start",
+                "rows":MS_ROWS,
+                "cols":MS_COLS,
+                "mine_count":MS_MINES,
+                "players":[p["nick"] for p in ms_room["players"]],
+                "current":ms_room["players"][0]["nick"]
+            })
+
+    elif cmd == "rematch_reject":
+        if ms_room["state"] != "resulting":
+            return
+        if ms_room["rematch_responses"].get(nick) != "pending":
+            return
+        ms_room["rematch_responses"][nick] = "reject"
+        await ms_broadcast_rematch_status()
+        if all(s != "pending" for s in ms_room["rematch_responses"].values()):
+            if ms_room["countdown_task"]:
+                ms_room["countdown_task"].cancel()
+                ms_room["countdown_task"] = None
+            accept_nicks = [n for n, s in ms_room["rematch_responses"].items() if s == "accept"]
+            if len(accept_nicks) < MS_MIN_PLAYER:
+                await ms_broadcast({"cmd": "rematch_cancel", "msg": "Not enough players for rematch"})
+                ms_reset()
+                return
+            ranked = sorted(ms_room["players"], key=lambda p: p["score"], reverse=True)
+            new_players = []
+            for p in ranked:
+                if p["nick"] in accept_nicks:
+                    new_players.append({
+                        "nick": p["nick"],
+                        "writer": p["writer"],
+                        "alive": True,
+                        "score": 0
+                    })
+            ms_room["players"] = new_players
+            ms_room["state"] = "gaming"
+            ms_room["first_click"] = True
+            ms_room["current_idx"] = 0
+            ms_room["mine_map"] = None
+            ms_room["cell_number"] = None
+            ms_room["cell_state"] = None
+            await ms_broadcast({
+                "cmd":"start",
+                "rows":MS_ROWS,
+                "cols":MS_COLS,
+                "mine_count":MS_MINES,
+                "players":[p["nick"] for p in ms_room["players"]],
+                "current":ms_room["players"][0]["nick"]
+            })
 
 async def handle_client(reader, writer):
     addr = writer.get_extra_info('peername')
@@ -276,28 +533,49 @@ async def handle_client(reader, writer):
         leave_msg = f"User('{ip}',{port}) {nickname} left"
         await broadcast_text(leave_msg)
         # 扫雷房间用户下线处理
-        if ms_room["state"] in ("waiting","gaming"):
-            before_len = len(ms_room["players"])
-            ms_room["players"] = [p for p in ms_room["players"] if p["writer"] != writer]
-            after_len = len(ms_room["players"])
-            if before_len != after_len:
-                if ms_room["state"] == "waiting":
+        if ms_room["state"] in ("waiting", "gaming", "resulting"):
+            if ms_room["state"] == "waiting":
+                if nickname in ms_room["invite_responses"]:
+                    ms_room["invite_responses"][nickname] = "reject"
+                    await ms_broadcast_invite_status()
+                before_len = len(ms_room["players"])
+                ms_room["players"] = [p for p in ms_room["players"] if p["writer"] != writer]
+                after_len = len(ms_room["players"])
+                if before_len != after_len:
                     await ms_broadcast({
                         "cmd":"leave_wait",
                         "players":[p["nick"] for p in ms_room["players"]],
                         "count":len(ms_room["players"])
                     })
-                else:
+                if ms_room["inviter_writer"] == writer:
+                    await ms_broadcast({"cmd":"cancel","msg":"Inviter left"})
+                    ms_reset()
+
+            elif ms_room["state"] == "gaming":
+                player_left = None
+                for p in ms_room["players"]:
+                    if p["writer"] == writer:
+                        p["alive"] = False
+                        player_left = p
+                        break
+                if player_left:
+                    ms_room["players"] = [p for p in ms_room["players"] if p["writer"] != writer]
                     if len(ms_room["players"]) < MS_MIN_PLAYER:
                         await ms_broadcast({"cmd":"abort","msg":"Player left, game aborted"})
                         ms_reset()
                     else:
                         if ms_room["current_idx"] >= len(ms_room["players"]):
-                            ms_room["current_idx"] =0
+                            ms_room["current_idx"] = 0
+                        elif ms_room["players"][ms_room["current_idx"]]["writer"] == writer:
+                            ms_next_player()
                         await ms_broadcast(ms_build_update())
-            if ms_room["inviter_writer"] == writer and ms_room["state"] == "waiting":
-                await ms_broadcast({"cmd":"cancel","msg":"Inviter left"})
-                ms_reset()
+
+            elif ms_room["state"] == "resulting":
+                if nickname in ms_room["rematch_responses"]:
+                    ms_room["rematch_responses"][nickname] = "reject"
+                    await ms_broadcast_rematch_status()
+                ms_room["players"] = [p for p in ms_room["players"] if p["writer"] != writer]
+
         writer.close()
         await writer.wait_closed()
 

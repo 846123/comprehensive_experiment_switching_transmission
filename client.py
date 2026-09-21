@@ -2,12 +2,15 @@ import sys
 import json
 import struct
 import socket
+import os
+import uuid
+import threading
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QDialog, QMessageBox, QFileDialog,
-    QGridLayout, QSizePolicy, QScrollArea
+    QGridLayout, QSizePolicy, QScrollArea, QProgressBar
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QMetaObject
 from PyQt6.QtGui import QFont
 
 
@@ -158,6 +161,14 @@ class TcpClientThread(QThread):
     connected_signal = pyqtSignal()
     fail_signal = pyqtSignal(str)
     disconnect_signal = pyqtSignal()
+    file_info_signal = pyqtSignal(str, str, str, int)  # file_id, sender, filename, file_size
+    file_chunk_signal = pyqtSignal(str, int, bytes)  # file_id, offset, data
+    file_end_signal = pyqtSignal(str, str, str)  # file_id, status, msg
+    send_progress_signal = pyqtSignal(int, int)  # sent, total
+    send_error_signal = pyqtSignal(str)
+
+    FILE_CHUNK_SIZE = 4096
+    FILE_ID_LEN = 32
 
     def __init__(self, host, port, nick):
         super().__init__()
@@ -166,6 +177,9 @@ class TcpClientThread(QThread):
         self.nick = nick
         self.sock = None
         self.running = True
+        self.receiving_files = {}
+        self.chunk_buffer = {}  # file_id -> {offset: bytes}
+        self.pending_end = set()  # 已收到结束包但未完成接收的文件
 
     def run(self):
         try:
@@ -193,18 +207,65 @@ class TcpClientThread(QThread):
                     elif mt == 4:
                         obj = json.loads(payload.decode("utf-8", errors="replace"))
                         self.ms_signal.emit(obj)
+                    elif mt == 5:
+                        info = json.loads(payload.decode("utf-8"))
+                        self.file_info_signal.emit(info["file_id"], info["sender"], info["filename"], info["file_size"])
+                    elif mt == 6:
+                        file_id, offset, data = self.unpack_file_chunk(payload)
+                        self._handle_file_chunk(file_id, offset, data)
+                        self.file_chunk_signal.emit(file_id, offset, data)
+                    elif mt == 7:
+                        info = json.loads(payload.decode("utf-8"))
+                        self._handle_file_end(info["file_id"])
+                        self.file_end_signal.emit(info["file_id"], info["status"], info.get("msg", ""))
             self.sock.close()
-        except Exception as e:
+        except socket.error as e:
             self.fail_signal.emit(str(e))
         finally:
             self.disconnect_signal.emit()
+
+    def _handle_file_chunk(self, file_id, offset, data):
+        # 已开始接收：直接写文件
+        if file_id in self.receiving_files:
+            info = self.receiving_files[file_id]
+            info["handle"].seek(offset)
+            info["handle"].write(data)
+            info["received"] += len(data)
+        # 未开始接收：先缓存
+        else:
+            if file_id not in self.chunk_buffer:
+                self.chunk_buffer[file_id] = {}
+            self.chunk_buffer[file_id][offset] = data
+
+    def _handle_file_end(self, file_id):
+        # 已开始接收：直接完成
+        if file_id in self.receiving_files:
+            info = self.receiving_files[file_id]
+            info["handle"].close()
+            del self.receiving_files[file_id]
+            if file_id in self.chunk_buffer:
+                del self.chunk_buffer[file_id]
+        # 未开始接收：标记待完成，不删缓存
+        else:
+            self.pending_end.add(file_id)
+
+    def pack_file_chunk(self, file_id, offset, data):
+        fid = file_id.ljust(self.FILE_ID_LEN, '\0').encode('utf-8')
+        off = struct.pack('>I', offset)
+        return fid + off + data
+
+    def unpack_file_chunk(self, payload):
+        file_id = payload[:self.FILE_ID_LEN].decode('utf-8').rstrip('\0')
+        offset = struct.unpack('>I', payload[self.FILE_ID_LEN:self.FILE_ID_LEN + 4])[0]
+        data = payload[self.FILE_ID_LEN + 4:]
+        return file_id, offset, data
 
     def send_text(self, text):
         pkt = pack_msg(0, text.encode("utf-8"))
         try:
             if self.sock:
                 self.sock.sendall(pkt)
-        except Exception as e:
+        except socket.error as e:
             print("send err", e)
 
     def send_json(self, obj):
@@ -213,17 +274,252 @@ class TcpClientThread(QThread):
         try:
             if self.sock:
                 self.sock.sendall(pkt)
-        except Exception as e:
+        except socket.error as e:
             print("send json err", e)
+
+    def send_file(self, file_path):
+        try:
+            file_size = os.path.getsize(file_path)
+            filename = os.path.basename(file_path)
+            file_id = uuid.uuid4().hex
+
+            meta = json.dumps({
+                "file_id": file_id,
+                "filename": filename,
+                "file_size": file_size
+            }, ensure_ascii=False).encode('utf-8')
+            self.sock.sendall(pack_msg(5, meta))
+
+            sent = 0
+            with open(file_path, 'rb') as f:
+                while True:
+                    chunk = f.read(self.FILE_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    pkt_data = self.pack_file_chunk(file_id, sent, chunk)
+                    self.sock.sendall(pack_msg(6, pkt_data))
+                    sent += len(chunk)
+                    self.send_progress_signal.emit(sent, file_size)
+
+            end = json.dumps({
+                "file_id": file_id,
+                "status": "success",
+                "msg": ""
+            }, ensure_ascii=False).encode('utf-8')
+            self.sock.sendall(pack_msg(7, end))
+            return True, ""
+        except (socket.error, OSError, IOError) as e:
+            return False, str(e)
+
+    def start_receive_file(self, file_id, save_path):
+        try:
+            f = open(save_path, 'wb')
+            self.receiving_files[file_id] = {
+                "path": save_path,
+                "handle": f,
+                "size": 0,
+                "received": 0
+            }
+            # 写入之前缓存的所有分片
+            if file_id in self.chunk_buffer:
+                for offset in sorted(self.chunk_buffer[file_id].keys()):
+                    data = self.chunk_buffer[file_id][offset]
+                    f.seek(offset)
+                    f.write(data)
+                    self.receiving_files[file_id]["received"] += len(data)
+                del self.chunk_buffer[file_id]
+
+            # 检查是否已经收到结束包
+            if file_id in self.pending_end:
+                self.pending_end.remove(file_id)
+                info = self.receiving_files[file_id]
+                info["handle"].close()
+                del self.receiving_files[file_id]
+                return True, "finished"
+            return True, ""
+        except OSError as e:
+            return False, str(e)
+
+    def get_received_size(self, file_id):
+        if file_id in self.receiving_files:
+            return self.receiving_files[file_id]["received"]
+        if file_id in self.chunk_buffer:
+            return sum(len(d) for d in self.chunk_buffer[file_id].values())
+        return 0
+
+    def is_file_finished(self, file_id):
+        return file_id in self.pending_end or (
+                file_id not in self.receiving_files
+                and file_id not in self.chunk_buffer
+        )
+
+    def finish_receive_file(self, file_id):
+        if file_id in self.receiving_files:
+            info = self.receiving_files[file_id]
+            info["handle"].close()
+            del self.receiving_files[file_id]
+        if file_id in self.chunk_buffer:
+            del self.chunk_buffer[file_id]
+        if file_id in self.pending_end:
+            self.pending_end.remove(file_id)
 
     def close_conn(self):
         self.running = False
+        for info in self.receiving_files.values():
+            try:
+                info["handle"].close()
+            except OSError:
+                pass
+        self.receiving_files.clear()
+        self.chunk_buffer.clear()
+        self.pending_end.clear()
         if self.sock:
             try:
                 self.sock.shutdown(socket.SHUT_RDWR)
-            except:
+            except socket.error:
                 pass
             self.sock.close()
+
+
+# ========== 文件发送进度弹窗 ==========
+class FileSendProgressDialog(QDialog):
+    def __init__(self, parent, filename):
+        super().__init__(parent)
+        self.setWindowTitle("发送文件")
+        self.setFixedSize(360, 120)
+        self.setModal(False)
+
+        layout = QVBoxLayout()
+        self.label = QLabel(f"正在发送：{filename}")
+        layout.addWidget(self.label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+
+        self.status_label = QLabel("准备中...")
+        self.status_label.setStyleSheet("color:#666;")
+        layout.addWidget(self.status_label)
+
+        self.setLayout(layout)
+
+    def update_progress(self, sent, total):
+        percent = int(sent * 100 / total) if total > 0 else 0
+        self.progress.setValue(percent)
+        self.status_label.setText(f"{sent / 1024:.1f} KB / {total / 1024:.1f} KB")
+
+    def finish_success(self):
+        self.progress.setValue(100)
+        self.status_label.setText("发送完成")
+        QTimer.singleShot(800, self.close)
+
+    def finish_error(self, msg):
+        self.status_label.setText(f"发送失败：{msg}")
+        self.status_label.setStyleSheet("color:red;")
+
+
+# ========== 文件接收保存对话框 ==========
+class FileReceiveDialog(QDialog):
+    def __init__(self, parent, sender, filename, file_size):
+        super().__init__(parent)
+        self.setWindowTitle("接收文件")
+        self.setFixedSize(420, 180)
+        self.sender = sender
+        self.filename = filename
+        self.file_size = file_size
+        self.save_path = ""
+
+        layout = QVBoxLayout()
+
+        info = QLabel(f"{sender} 向你发送文件：\n文件名：{filename}\n大小：{file_size / 1024:.2f} KB")
+        layout.addWidget(info)
+
+        path_layout = QHBoxLayout()
+        self.path_edit = QLineEdit()
+        self.path_edit.setReadOnly(True)
+        path_layout.addWidget(self.path_edit, 1)
+
+        btn_browse = QPushButton("浏览")
+        btn_browse.clicked.connect(self.on_browse)
+        path_layout.addWidget(btn_browse)
+        layout.addLayout(path_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch(1)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = QPushButton("保存")
+        btn_save.clicked.connect(self.on_save)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_save)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+
+    def on_browse(self):
+        default_name = self.get_unique_filename(os.path.expanduser("~"), self.filename)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存文件", default_name, "所有文件 (*.*)"
+        )
+        if path:
+            self.path_edit.setText(path)
+
+    @staticmethod
+    def get_unique_filename(directory, filename):
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        candidate = os.path.join(directory, filename)
+        while os.path.exists(candidate):
+            candidate = os.path.join(directory, f"{base}({counter}){ext}")
+            counter += 1
+        return candidate
+
+    def on_save(self):
+        path = self.path_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "提示", "请选择保存路径")
+            return
+        self.save_path = path
+        self.accept()
+
+
+# ========== 文件接收进度弹窗 ==========
+class FileReceiveProgressDialog(QDialog):
+    def __init__(self, parent, filename):
+        super().__init__(parent)
+        self.setWindowTitle("接收文件")
+        self.setFixedSize(360, 120)
+        self.setModal(False)
+
+        layout = QVBoxLayout()
+        self.label = QLabel(f"正在接收：{filename}")
+        layout.addWidget(self.label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+
+        self.status_label = QLabel("接收中...")
+        self.status_label.setStyleSheet("color:#666;")
+        layout.addWidget(self.status_label)
+
+        self.setLayout(layout)
+
+    def update_progress(self, received, total):
+        percent = int(received * 100 / total) if total > 0 else 0
+        self.progress.setValue(percent)
+        self.status_label.setText(f"{received / 1024:.1f} KB / {total / 1024:.1f} KB")
+
+    def finish_success(self):
+        self.progress.setValue(100)
+        self.status_label.setText("接收完成")
+        QTimer.singleShot(800, self.close)
+
+    def finish_error(self, msg):
+        self.status_label.setText(f"接收失败：{msg}")
+        self.status_label.setStyleSheet("color:red;")
 
 
 # ========== 扫雷邀请弹窗 ==========
@@ -284,8 +580,9 @@ class MinesweeperInviteDialog(QDialog):
     def update_player_list(self):
         for i in reversed(range(self.player_layout.count())):
             item = self.player_layout.itemAt(i)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
 
         for nick, status in self.responses.items():
             row = QHBoxLayout()
@@ -394,8 +691,9 @@ class GameResultDialog(QDialog):
     def update_rank_list(self):
         for i in reversed(range(self.rank_layout.count())):
             item = self.rank_layout.itemAt(i)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
 
         for idx, item in enumerate(self.result, 1):
             nick = item["nick"]
@@ -470,6 +768,8 @@ class MinesweeperWindow(QDialog):
         self.buttons = {}
         self.current_player = None
         self.players = []
+        self.player_label = None
+        self.grid_layout = None
         self.init_ui()
 
     def init_ui(self):
@@ -559,14 +859,14 @@ class VideoInvitePopup(QDialog):
         self.setFixedSize(280, 140)
         lay = QVBoxLayout()
         lay.addWidget(QLabel("Incoming Video Call"))
-        hlay = QHBoxLayout()
+        h_layout = QHBoxLayout()
         btn_accept = QPushButton("Accept")
         btn_reject = QPushButton("Reject")
         btn_accept.clicked.connect(self.accept)
         btn_reject.clicked.connect(self.reject)
-        hlay.addWidget(btn_accept)
-        hlay.addWidget(btn_reject)
-        lay.addLayout(hlay)
+        h_layout.addWidget(btn_accept)
+        h_layout.addWidget(btn_reject)
+        lay.addLayout(h_layout)
         self.setLayout(lay)
 
 
@@ -621,6 +921,12 @@ class ChatMainWindow(QMainWindow):
         self.ms_window = None
         self.invite_dialog = None
         self.result_dialog = None
+        self.send_progress_dlg = None
+        self.receive_dialog = None
+        self.receive_progress_dlg = None
+        self.current_recv_file_id = ""
+        self.current_recv_file_size = 0
+        self.current_recv_filename = ""
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -659,6 +965,12 @@ class ChatMainWindow(QMainWindow):
         self.tcp.msg_signal.connect(self.on_recv_msg)
         self.tcp.ms_signal.connect(self.on_ms_event)
         self.tcp.disconnect_signal.connect(self.on_disconnect)
+        self.tcp.file_info_signal.connect(self.on_file_info)
+        self.tcp.file_chunk_signal.connect(self.on_file_chunk)
+        self.tcp.file_end_signal.connect(self.on_file_end)
+        self.tcp.send_progress_signal.connect(self.on_send_progress)
+        self.tcp.send_error_signal.connect(self.on_send_error)
+
         self.btn_send.clicked.connect(self.send_msg)
         self.msg_input.returnPressed.connect(self.send_msg)
         self.btn_ms.clicked.connect(self.open_minesweeper)
@@ -677,8 +989,9 @@ class ChatMainWindow(QMainWindow):
             self.resize_timer = None
             view_width = self.scroll_area.viewport().width()
             max_w = int(view_width * 0.8)
-            for bubble in self.scroll_container.findChildren(MsgBubbleWidget):
-                bubble.set_bubble_max_width(max_w)
+            for child in self.scroll_container.findChildren(QWidget):
+                if isinstance(child, MsgBubbleWidget):
+                    child.set_bubble_max_width(max_w)
             self.scroll_container.adjustSize()
 
     def add_bubble(self, bubble_widget):
@@ -747,7 +1060,6 @@ class ChatMainWindow(QMainWindow):
                 self.result_dialog.close()
             self.ms_window = MinesweeperWindow(self, self.tcp, self.nick)
             self.ms_window.build_grid()
-            # 修复：开局初始化棋盘和玩家状态，让第一个玩家可以操作
             init_cells = [["c" for _ in range(16)] for _ in range(16)]
             init_players = [{"nick": p, "alive": True} for p in d["players"]]
             self.ms_window.update_board(init_cells, d["current"], init_players)
@@ -781,10 +1093,82 @@ class ChatMainWindow(QMainWindow):
         dlg = VideoInvitePopup(self)
         dlg.exec()
 
+    # ========== 文件传输功能 ==========
     def send_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择文件")
-        if path:
-            QMessageBox.information(self, "提示", "文件传输功能暂未实现")
+        if not path:
+            return
+        filename = os.path.basename(path)
+        self.send_progress_dlg = FileSendProgressDialog(self, filename)
+        self.send_progress_dlg.show()
+
+        def do_send():
+            success, msg = self.tcp.send_file(path)
+            if not success:
+                self.tcp.send_error_signal.emit(msg)
+
+        threading.Thread(target=do_send, daemon=True).start()
+
+    def on_send_progress(self, sent, total):
+        if self.send_progress_dlg and self.send_progress_dlg.isVisible():
+            if sent == total and total > 0:
+                self.send_progress_dlg.finish_success()
+            else:
+                self.send_progress_dlg.update_progress(sent, total)
+
+    def on_send_error(self, msg):
+        if self.send_progress_dlg and self.send_progress_dlg.isVisible():
+            self.send_progress_dlg.finish_error(msg)
+
+    def on_file_info(self, file_id, sender, filename, file_size):
+        if sender == self.nick:
+            return
+        self.current_recv_file_id = file_id
+        self.current_recv_filename = filename
+        self.current_recv_file_size = file_size
+
+        self.receive_dialog = FileReceiveDialog(self, sender, filename, file_size)
+        if self.receive_dialog.exec() == QDialog.DialogCode.Accepted:
+            save_path = self.receive_dialog.save_path
+            success, status = self.tcp.start_receive_file(file_id, save_path)
+            if not success:
+                QMessageBox.critical(self, "错误", f"无法创建文件：{status}")
+                return
+
+            self.receive_progress_dlg = FileReceiveProgressDialog(self, filename)
+            self.receive_progress_dlg.show()
+
+            # 立刻刷新当前进度
+            received = self.tcp.get_received_size(file_id)
+            self.receive_progress_dlg.update_progress(received, file_size)
+
+            # 如果已经传输完成，直接关闭
+            if status == "finished":
+                self.receive_progress_dlg.finish_success()
+                self.current_recv_file_id = ""
+                self.current_recv_file_size = 0
+
+    def on_file_chunk(self, file_id, offset, data):
+        if not self.current_recv_file_id or file_id != self.current_recv_file_id:
+            return
+        received = self.tcp.get_received_size(file_id)
+        if self.receive_progress_dlg and self.receive_progress_dlg.isVisible():
+            self.receive_progress_dlg.update_progress(received, self.current_recv_file_size)
+
+    def on_file_end(self, file_id, status, msg):
+        if not self.current_recv_file_id or file_id != self.current_recv_file_id:
+            return
+        # 如果还在等待用户保存，先不处理
+        if not self.receive_progress_dlg or not self.receive_progress_dlg.isVisible():
+            return
+
+        self.tcp.finish_receive_file(self.current_recv_file_id)
+        if status == "success":
+            self.receive_progress_dlg.finish_success()
+        else:
+            self.receive_progress_dlg.finish_error(msg)
+        self.current_recv_file_id = ""
+        self.current_recv_file_size = 0
 
     def on_disconnect(self):
         bubble = MsgBubbleWidget("sys", "", "与服务器断开连接")
@@ -799,6 +1183,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     login = LoginDialog()
     if login.exec():
-        w = ChatMainWindow(login.host, login.nickname, login.tcp_thread)
-        w.show()
+        main_window = ChatMainWindow(login.host, login.nickname, login.tcp_thread)
+        main_window.show()
         sys.exit(app.exec())

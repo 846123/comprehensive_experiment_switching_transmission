@@ -2,6 +2,7 @@ import asyncio
 import struct
 import json
 import random
+import uuid
 
 clients = {}
 
@@ -56,13 +57,13 @@ def ms_reset():
 
 
 async def broadcast_packet(packet, exclude=None):
-    for w in list(clients.keys()):
-        if w is not exclude:
+    for writer in list(clients.keys()):
+        if writer is not exclude:
             try:
-                w.write(packet)
-                await w.drain()
-            except Exception:
-                pass
+                writer.write(packet)
+                await writer.drain()
+            except Exception as e:
+                print(f"[广播] 发送失败: {e}")
 
 
 async def broadcast_text(text, exclude=None):
@@ -82,15 +83,15 @@ async def ms_broadcast(payload_dict, exclude=None):
 async def ms_broadcast_to_players(payload_dict, exclude=None):
     payload = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
     pkt = pack_msg(4, payload)
-    for p in ms_room["players"]:
-        w = p["writer"]
-        if w is exclude:
+    for player in ms_room["players"]:
+        writer = player["writer"]
+        if writer is exclude:
             continue
         try:
-            w.write(pkt)
-            await w.drain()
-        except Exception:
-            pass
+            writer.write(pkt)
+            await writer.drain()
+        except Exception as e:
+            print(f"[游戏广播] 发送失败: {e}")
 
 
 async def ms_broadcast_invite_status():
@@ -221,7 +222,6 @@ async def ms_try_start_game():
     ms_room["state"] = "gaming"
     ms_room["first_click"] = True
     ms_room["current_idx"] = 0
-    # 仅发给参与玩家
     await ms_broadcast_to_players({
         "cmd": "start",
         "rows": MS_ROWS,
@@ -249,7 +249,6 @@ async def ms_end_game():
     ms_room["state"] = "resulting"
     ranked = sorted(ms_room["players"], key=lambda p: p["score"], reverse=True)
     result = [{"nick": p["nick"], "score": p["score"]} for p in ranked]
-    # 仅发给参与玩家
     await ms_broadcast_to_players({
         "cmd": "game_end",
         "result": result
@@ -397,7 +396,6 @@ async def handle_ms_cmd(data, nick, writer):
             if ms_room["mine_map"][x][y]:
                 ms_room["cell_state"][x][y] = 3
                 cur_player["alive"] = False
-                # 存活人数不足2人直接结束游戏
                 if ms_get_alive_count() < MS_MIN_PLAYER:
                     await ms_broadcast_to_players(ms_build_update())
                     await ms_end_game()
@@ -440,6 +438,157 @@ async def handle_ms_cmd(data, nick, writer):
             await ms_try_rematch()
 
 
+# ========== 文件传输模块 ==========
+FILE_CHUNK_SIZE = 4096
+FILE_ID_LEN = 32
+
+file_transfer_queue = []
+current_file_transfer = None
+file_transfer_lock = None
+
+
+def gen_file_id():
+    return uuid.uuid4().hex
+
+
+def pack_file_chunk(file_id, offset, data):
+    fid = file_id.ljust(FILE_ID_LEN, '\0').encode('utf-8')
+    off = struct.pack('>I', offset)
+    return fid + off + data
+
+
+def unpack_file_chunk(payload):
+    file_id = payload[:FILE_ID_LEN].decode('utf-8').rstrip('\0')
+    offset = struct.unpack('>I', payload[FILE_ID_LEN:FILE_ID_LEN + 4])[0]
+    data = payload[FILE_ID_LEN + 4:]
+    return file_id, offset, data
+
+
+async def broadcast_file_packet(pkt, exclude_writer=None):
+    for writer in list(clients.keys()):
+        if writer == exclude_writer:
+            continue
+        try:
+            writer.write(pkt)
+            await writer.drain()
+        except Exception as e:
+            print(f"[文件广播] 发送失败: {e}")
+
+
+async def process_next_file_transfer():
+    global current_file_transfer
+    async with file_transfer_lock:
+        if current_file_transfer is not None:
+            return
+        if not file_transfer_queue:
+            return
+        task = file_transfer_queue.pop(0)
+        current_file_transfer = task
+        print(f"[FILE] 开始传输文件：{task['filename']} 发送者：{task['sender']}")
+
+    meta_payload = json.dumps({
+        "file_id": task["file_id"],
+        "sender": task["sender"],
+        "filename": task["filename"],
+        "file_size": task["file_size"]
+    }, ensure_ascii=False).encode('utf-8')
+    pkt = pack_msg(5, meta_payload)
+    await broadcast_file_packet(pkt, exclude_writer=task["sender_writer"])
+
+
+async def handle_file_info(payload, sender_nick, sender_writer):
+    try:
+        info = json.loads(payload.decode('utf-8'))
+    except json.JSONDecodeError as e:
+        print(f"[文件] 元信息解析失败: {e}")
+        return
+
+    file_id = info["file_id"]
+    filename = info["filename"]
+    file_size = info["file_size"]
+
+    task = {
+        "file_id": file_id,
+        "sender": sender_nick,
+        "sender_writer": sender_writer,
+        "filename": filename,
+        "file_size": file_size,
+        "received_offset": 0
+    }
+    file_transfer_queue.append(task)
+    print(f"[FILE] {sender_nick} 发起文件传输：{filename} ({file_size}字节)，已入队")
+    await process_next_file_transfer()
+
+
+async def handle_file_chunk(payload, sender_writer):
+    global current_file_transfer
+    if current_file_transfer is None:
+        print("[文件] 收到分片但无当前传输，丢弃")
+        return
+
+    # 仅校验发送者身份和文件ID
+    if current_file_transfer["sender_writer"] != sender_writer:
+        print("[文件] 分片发送者不匹配，丢弃")
+        return
+
+    try:
+        file_id, offset, data = unpack_file_chunk(payload)
+    except struct.error as e:
+        print(f"[文件] 分片解析失败: {e}")
+        return
+
+    if file_id != current_file_transfer["file_id"]:
+        print("[文件] 分片文件ID不匹配，丢弃")
+        return
+
+    current_file_transfer["received_offset"] = offset + len(data)
+    pkt = pack_msg(6, payload)
+    await broadcast_file_packet(pkt, exclude_writer=sender_writer)
+
+
+async def handle_file_end(payload, sender_writer):
+    global current_file_transfer
+    if current_file_transfer is None:
+        return
+    if current_file_transfer["sender_writer"] != sender_writer:
+        return
+
+    try:
+        info = json.loads(payload.decode('utf-8'))
+    except json.JSONDecodeError as e:
+        print(f"[文件] 结束包解析失败: {e}")
+        return
+    if info["file_id"] != current_file_transfer["file_id"]:
+        return
+
+    print(f"[FILE] 文件传输完成：{current_file_transfer['filename']}")
+    pkt = pack_msg(7, payload)
+    await broadcast_file_packet(pkt, exclude_writer=sender_writer)
+
+    async with file_transfer_lock:
+        current_file_transfer = None
+    asyncio.create_task(process_next_file_transfer())
+
+
+async def abort_current_file_transfer(reason="发送方断开连接"):
+    global current_file_transfer
+    if current_file_transfer is None:
+        return
+    end_payload = json.dumps({
+        "file_id": current_file_transfer["file_id"],
+        "status": "error",
+        "msg": reason
+    }, ensure_ascii=False).encode('utf-8')
+    pkt = pack_msg(7, end_payload)
+    await broadcast_file_packet(pkt, exclude_writer=current_file_transfer["sender_writer"])
+    print(f"[FILE] 传输中断：{current_file_transfer['filename']} - {reason}")
+
+    async with file_transfer_lock:
+        current_file_transfer = None
+    asyncio.create_task(process_next_file_transfer())
+
+
+# ========== 客户端连接处理 ==========
 async def handle_client(reader, writer):
     addr = writer.get_extra_info('peername')
     ip, port = addr
@@ -478,9 +627,15 @@ async def handle_client(reader, writer):
                 elif mt == 4:
                     try:
                         data = json.loads(payload.decode("utf-8"))
-                    except:
+                    except json.JSONDecodeError:
                         continue
                     await handle_ms_cmd(data, nickname, writer)
+                elif mt == 5:
+                    await handle_file_info(payload, nickname, writer)
+                elif mt == 6:
+                    await handle_file_chunk(payload, writer)
+                elif mt == 7:
+                    await handle_file_end(payload, writer)
     except Exception as e:
         print(f"[错误] {nickname} 连接异常：{e}")
     finally:
@@ -489,6 +644,7 @@ async def handle_client(reader, writer):
         await broadcast_text(leave_msg)
         print(f"[连接] {nickname} 已离开")
 
+        # 扫雷状态处理
         if ms_room["state"] in ("waiting", "gaming", "resulting"):
             if ms_room["state"] == "waiting":
                 if nickname in ms_room["invite_responses"]:
@@ -529,11 +685,17 @@ async def handle_client(reader, writer):
                     await ms_broadcast_rematch_status()
                 ms_room["players"] = [p for p in ms_room["players"] if p["writer"] != writer]
 
+        # 文件传输处理
+        if current_file_transfer and current_file_transfer["sender_writer"] == writer:
+            await abort_current_file_transfer()
+
         writer.close()
         await writer.wait_closed()
 
 
 async def main():
+    global file_transfer_lock
+    file_transfer_lock = asyncio.Lock()
     server = await asyncio.start_server(handle_client, "0.0.0.0", 8080)
     print("Server running on 0.0.0.0:8080")
     async with server:

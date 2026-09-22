@@ -17,15 +17,27 @@ FILE_CHUNK_SIZE = 4096
 FILE_ID_LEN = 32
 
 # ========== 音视频通话常量 ==========
-MSG_TYPE_VIDEO_INVITE = 8       # 通话邀请
-MSG_TYPE_VIDEO_REPLY = 9        # 通话应答（接受/拒绝/挂断）
-MSG_TYPE_VIDEO_STATUS = 10      # 通话成员状态同步
+MSG_TYPE_VIDEO_INVITE = 8       # 通话邀请指令
+MSG_TYPE_VIDEO_REPLY = 9        # 通话应答
+MSG_TYPE_VIDEO_STATUS = 10      # 通话状态同步
 
 VIDEO_PORT_UDP = 8081
-VIDEO_TYPE_AV = "av"           # 音视频通话
+VIDEO_TYPE_AV = "av"
+
+# 房间状态
 VIDEO_STATE_IDLE = "idle"
-VIDEO_STATE_CALLING = "calling"
+VIDEO_STATE_INVITING = "inviting"
 VIDEO_STATE_CHATTING = "chatting"
+
+# 玩家响应状态
+RESPONSE_PENDING = "pending"
+RESPONSE_ACCEPT = "accept"
+RESPONSE_REJECT = "reject"
+
+# 邀请配置
+VIDEO_INVITE_TIMEOUT = 30  # 邀请倒计时30秒
+VIDEO_MAX_PLAYERS = 6     # 最大6人
+VIDEO_MIN_PLAYERS = 2     # 最少2人
 
 # UDP媒体帧常量
 VIDEO_FRAME_AUDIO = 0    # 音频帧

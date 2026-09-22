@@ -5,9 +5,14 @@ from .protocol import (
     pack_msg,
     MSG_TYPE_VIDEO_STATUS,
     VIDEO_STATE_IDLE,
-    VIDEO_STATE_CALLING,
+    VIDEO_STATE_INVITING,
     VIDEO_STATE_CHATTING,
-    VIDEO_TYPE_AV,
+    RESPONSE_PENDING,
+    RESPONSE_ACCEPT,
+    RESPONSE_REJECT,
+    VIDEO_INVITE_TIMEOUT,
+    VIDEO_MIN_PLAYERS,
+    VIDEO_MAX_PLAYERS,
     VIDEO_FRAME_AUDIO,
     VIDEO_FRAME_VIDEO,
     VIDEO_NICK_BYTES,
@@ -20,9 +25,12 @@ class VideoChatRoom:
     def __init__(self, client_manager: ClientManager):
         self.client_manager = client_manager
         self.state = VIDEO_STATE_IDLE
-        self.members = []  # 已接通的成员
-        self.udp_addresses = {}  # 昵称 -> UDP地址
+        self.caller = ""                # 发起人
+        self.players = {}               # 邀请阶段：{昵称: 响应状态}
+        self.chat_members = []          # 通话阶段：成员列表
+        self.udp_addresses = {}         # 昵称 -> UDP地址
         self.udp_socket = None
+        self.countdown_task = None      # 倒计时任务
 
     async def broadcast_all(self, payload_dict, exclude=None):
         """全员广播信令"""
@@ -30,24 +38,73 @@ class VideoChatRoom:
         pkt = pack_msg(MSG_TYPE_VIDEO_STATUS, payload)
         await self.client_manager.broadcast_all(pkt, exclude)
 
-    async def broadcast_to_members(self, payload_dict, exclude=None):
+    async def broadcast_to_chat(self, payload_dict, exclude=None):
         """仅通话内成员广播"""
         payload = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         pkt = pack_msg(MSG_TYPE_VIDEO_STATUS, payload)
-        writers = [m["writer"] for m in self.members]
+        writers = [m["writer"] for m in self.chat_members]
         await self.client_manager.broadcast_to(writers, pkt, exclude)
 
     def reset(self):
+        """重置房间状态"""
         self.state = VIDEO_STATE_IDLE
-        self.members.clear()
+        self.caller = ""
+        self.players.clear()
+        self.chat_members.clear()
         self.udp_addresses.clear()
-        print("[视频] 通话房间已重置")
+        if self.countdown_task:
+            self.countdown_task.cancel()
+            self.countdown_task = None
+        print("[视频] 房间已重置")
 
-    def get_member_nicks(self):
-        return [m["nick"] for m in self.members]
+    def _get_all_players(self):
+        """获取当前所有在线玩家列表"""
+        return self.client_manager.all_nicks()
+
+    async def _start_countdown(self):
+        """启动倒计时协程"""
+        try:
+            await asyncio.sleep(VIDEO_INVITE_TIMEOUT)
+            await self._settle_invite()
+        except asyncio.CancelledError:
+            pass
+
+    async def _settle_invite(self):
+        """结算邀请：统计接受人数，决定是否开启通话"""
+        if self.state != VIDEO_STATE_INVITING:
+            return
+
+        accept_players = [nick for nick, status in self.players.items() if status == RESPONSE_ACCEPT]
+        accept_count = len(accept_players)
+
+        if VIDEO_MIN_PLAYERS <= accept_count <= VIDEO_MAX_PLAYERS:
+            # 满足人数要求，进入通话
+            self.state = VIDEO_STATE_CHATTING
+            # 构建通话成员列表（带writer）
+            self.chat_members = []
+            all_clients = self.client_manager.clients
+            for nick in accept_players:
+                for writer, name in all_clients.items():
+                    if name == nick:
+                        self.chat_members.append({"nick": nick, "writer": writer})
+                        break
+            # 广播开始通话
+            await self.broadcast_all({
+                "cmd": "start",
+                "players": accept_players
+            })
+            print(f"[视频] 通话开始，成员：{accept_players}")
+        else:
+            # 人数不足，取消邀请
+            await self.broadcast_all({
+                "cmd": "cancel",
+                "msg": f"接受人数不足{VIDEO_MIN_PLAYERS}人，邀请已取消"
+            })
+            print(f"[视频] 邀请取消，接受人数：{accept_count}")
+            self.reset()
 
     async def udp_relay(self, port):
-        """UDP媒体流中继（视频核心功能，和扫雷完全无关）"""
+        """UDP媒体流中继"""
         loop = asyncio.get_running_loop()
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.bind(("0.0.0.0", port))
@@ -68,11 +125,12 @@ class VideoChatRoom:
             if self.state != VIDEO_STATE_CHATTING:
                 continue
 
-            # 转发给通话内其他所有人
-            for member in self.members:
-                if member["nick"] == sender_nick:
+            # 只转发给通话内的成员
+            chat_nicks = [m["nick"] for m in self.chat_members]
+            for nick in chat_nicks:
+                if nick == sender_nick:
                     continue
-                target_addr = self.udp_addresses.get(member["nick"])
+                target_addr = self.udp_addresses.get(nick)
                 if target_addr:
                     try:
                         await loop.sock_sendto(self.udp_socket, data, target_addr)
@@ -83,81 +141,155 @@ class VideoChatRoom:
         cmd = data.get("cmd")
         print(f"[视频] 收到指令：{cmd} 来自：{nick}")
 
-        if cmd == "call":
-            # 发起呼叫：全员振铃
-            if self.state == VIDEO_STATE_IDLE:
-                self.state = VIDEO_STATE_CALLING
-                self.members = [{"nick": nick, "writer": writer, "audio_on": True, "video_on": True}]
-            elif self.state in (VIDEO_STATE_CALLING, VIDEO_STATE_CHATTING):
-                # 已有通话，直接加入呼叫
-                if nick not in self.get_member_nicks():
-                    self.members.append({"nick": nick, "writer": writer, "audio_on": True, "video_on": True})
+        if cmd == "invite":
+            # 发起邀请
+            if self.state != VIDEO_STATE_IDLE:
+                # 已有通话/邀请，返回忙
+                pkt = pack_msg(MSG_TYPE_VIDEO_STATUS, json.dumps({
+                    "cmd": "busy",
+                    "msg": "当前已有视频通话进行中"
+                }).encode("utf-8"))
+                try:
+                    writer.write(pkt)
+                    await writer.drain()
+                except Exception:
+                    pass
+                return
 
+            # 初始化邀请
+            self.state = VIDEO_STATE_INVITING
+            self.caller = nick
+            all_nicks = self._get_all_players()
+            self.players = {n: RESPONSE_PENDING for n in all_nicks}
+            self.players[nick] = RESPONSE_ACCEPT  # 发起人默认接受
+
+            # 启动倒计时
+            self.countdown_task = asyncio.create_task(self._start_countdown())
+
+            # 全员广播邀请
             await self.broadcast_all({
-                "cmd": "incoming_call",
-                "caller": nick,
-                "members": self.get_member_nicks()
+                "cmd": "invite",
+                "inviter": nick,
+                "players": self.players,
+                "time_left": VIDEO_INVITE_TIMEOUT
             })
-            print(f"[视频] {nick} 发起音视频呼叫")
+            print(f"[视频] {nick} 发起视频邀请，在线人数：{len(all_nicks)}")
 
         elif cmd == "accept":
-            # 接受呼叫：直接加入通话
-            if nick in self.get_member_nicks():
+            if self.state != VIDEO_STATE_INVITING:
                 return
-            self.members.append({"nick": nick, "writer": writer, "audio_on": True, "video_on": True})
-            self.state = VIDEO_STATE_CHATTING
+            if nick not in self.players:
+                return
+            if self.players[nick] != RESPONSE_PENDING:
+                return
 
-            await self.broadcast_to_members({
-                "cmd": "member_join",
-                "nick": nick,
-                "members": self.get_member_nicks()
+            self.players[nick] = RESPONSE_ACCEPT
+            # 广播状态更新
+            await self.broadcast_all({
+                "cmd": "invite_status",
+                "responses": self.players
             })
-            print(f"[视频] {nick} 加入通话，当前成员：{self.get_member_nicks()}")
+
+            # 检查是否所有人都已响应
+            if all(s != RESPONSE_PENDING for s in self.players.values()):
+                if self.countdown_task:
+                    self.countdown_task.cancel()
+                    self.countdown_task = None
+                await self._settle_invite()
 
         elif cmd == "reject":
-            # 拒绝呼叫：不影响其他人
-            await self.broadcast_to_members({
-                "cmd": "member_reject",
-                "nick": nick
+            if self.state != VIDEO_STATE_INVITING:
+                return
+            if nick not in self.players:
+                return
+            if self.players[nick] != RESPONSE_PENDING:
+                return
+
+            self.players[nick] = RESPONSE_REJECT
+            await self.broadcast_all({
+                "cmd": "invite_status",
+                "responses": self.players
             })
 
+            if all(s != RESPONSE_PENDING for s in self.players.values()):
+                if self.countdown_task:
+                    self.countdown_task.cancel()
+                    self.countdown_task = None
+                await self._settle_invite()
+
+        elif cmd == "cancel":
+            # 发起人取消邀请
+            if self.state != VIDEO_STATE_INVITING:
+                return
+            if nick != self.caller:
+                return
+
+            await self.broadcast_all({
+                "cmd": "cancel",
+                "msg": "发起人已取消邀请"
+            })
+            print(f"[视频] {nick} 取消了视频邀请")
+            self.reset()
+
         elif cmd == "hangup":
-            # 挂断：离开房间
-            self.members = [m for m in self.members if m["nick"] != nick]
+            # 通话中挂断
+            if self.state != VIDEO_STATE_CHATTING:
+                return
+
+            # 移除该成员
+            self.chat_members = [m for m in self.chat_members if m["nick"] != nick]
             if nick in self.udp_addresses:
                 del self.udp_addresses[nick]
 
-            if len(self.members) == 0:
+            if len(self.chat_members) < VIDEO_MIN_PLAYERS:
+                # 人数不足，结束通话
+                await self.broadcast_all({
+                    "cmd": "call_end",
+                    "msg": "通话人数不足，已结束"
+                })
+                print("[视频] 通话结束，人数不足")
                 self.reset()
-                await self.broadcast_all({"cmd": "call_end"})
-                print("[视频] 通话结束，房间已重置")
-                return
-
-            await self.broadcast_to_members({
-                "cmd": "member_leave",
-                "nick": nick,
-                "members": self.get_member_nicks()
-            })
-            if len(self.members) < 2:
-                self.state = VIDEO_STATE_CALLING
+            else:
+                # 广播成员离开
+                await self.broadcast_to_chat({
+                    "cmd": "member_leave",
+                    "nick": nick,
+                    "players": [m["nick"] for m in self.chat_members]
+                })
 
     async def on_client_leave(self, nickname, writer):
         if self.state == VIDEO_STATE_IDLE:
             return
-        # 用户离线自动挂断
-        self.members = [m for m in self.members if m["nick"] != nickname]
-        if nickname in self.udp_addresses:
-            del self.udp_addresses[nickname]
 
-        if len(self.members) == 0:
-            self.reset()
-            await self.broadcast_all({"cmd": "call_end"})
-            return
+        if self.state == VIDEO_STATE_INVITING:
+            # 邀请阶段离线，按拒绝处理
+            if nickname in self.players and self.players[nickname] == RESPONSE_PENDING:
+                self.players[nickname] = RESPONSE_REJECT
+                await self.broadcast_all({
+                    "cmd": "invite_status",
+                    "responses": self.players
+                })
+                if all(s != RESPONSE_PENDING for s in self.players.values()):
+                    if self.countdown_task:
+                        self.countdown_task.cancel()
+                        self.countdown_task = None
+                    await self._settle_invite()
 
-        await self.broadcast_to_members({
-            "cmd": "member_leave",
-            "nick": nickname,
-            "members": self.get_member_nicks()
-        })
-        if len(self.members) < 2:
-            self.state = VIDEO_STATE_CALLING
+        elif self.state == VIDEO_STATE_CHATTING:
+            # 通话阶段离线，按挂断处理
+            self.chat_members = [m for m in self.chat_members if m["nick"] != nickname]
+            if nickname in self.udp_addresses:
+                del self.udp_addresses[nickname]
+
+            if len(self.chat_members) < VIDEO_MIN_PLAYERS:
+                await self.broadcast_all({
+                    "cmd": "call_end",
+                    "msg": "通话人数不足，已结束"
+                })
+                self.reset()
+            else:
+                await self.broadcast_to_chat({
+                    "cmd": "member_leave",
+                    "nick": nickname,
+                    "players": [m["nick"] for m in self.chat_members]
+                })

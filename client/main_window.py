@@ -291,56 +291,61 @@ class ChatMainWindow(QMainWindow):
 
     # ========== 音视频通话功能 ==========
     def open_video_chat(self):
-        self.tcp.send_json({"cmd": "call"}, MSG_TYPE_VIDEO_INVITE)
-        # 自己作为发起人先弹出等待窗
-        self.video_invite_dlg = VideoInviteDialog(self, self.nick, self.nick, self.tcp)
-        self.video_invite_dlg.show()
+        self.tcp.send_json({"cmd": "invite"}, MSG_TYPE_VIDEO_INVITE)
 
     def on_video_event(self, d):
         cmd = d.get("cmd")
 
-        if cmd == "incoming_call":
-            # 收到来电
+        if cmd == "invite":
+            # 收到邀请
             if self.video_invite_dlg and self.video_invite_dlg.isVisible():
                 return
             if self.video_chat_window and self.video_chat_window.isVisible():
-                # 已在通话中，直接加入
-                self.tcp.send_json({"cmd": "accept"}, MSG_TYPE_VIDEO_INVITE)
+                # 已在通话中，忽略新邀请
                 return
 
             self.video_invite_dlg = VideoInviteDialog(
-                self, d["caller"], self.nick, self.tcp
+                self, d["inviter"], d["players"], self.nick, self.tcp
             )
-            # 接受后打开通话窗口
-            if self.video_invite_dlg.exec() == QDialog.DialogCode.Accepted:
-                self.video_chat_window = VideoChatWindow(
-                    self, self.tcp, self.nick, self.tcp.host
-                )
-                self.video_chat_window.show()
-                self.video_chat_window.start_stream()
+            self.video_invite_dlg.show()
 
-        elif cmd == "member_join":
-            if self.video_chat_window and self.video_chat_window.isVisible():
-                self.video_chat_window.update_members(d["members"])
+        elif cmd == "invite_status":
+            # 状态更新
+            if self.video_invite_dlg and self.video_invite_dlg.isVisible():
+                self.video_invite_dlg.update_status(d["responses"])
+
+        elif cmd == "cancel":
+            # 邀请取消
             if self.video_invite_dlg and self.video_invite_dlg.isVisible():
                 self.video_invite_dlg.close()
-                # 发起人看到有人加入后自动打开通话窗口
-                if not self.video_chat_window:
-                    self.video_chat_window = VideoChatWindow(
-                        self, self.tcp, self.nick, self.tcp.host
-                    )
-                    self.video_chat_window.show()
-                    self.video_chat_window.start_stream()
+            QMessageBox.information(self, "提示", d.get("msg", "邀请已取消"))
+            self.video_invite_dlg = None
+
+        elif cmd == "busy":
+            QMessageBox.warning(self, "提示", d.get("msg", "当前已有视频通话进行中"))
+
+        elif cmd == "start":
+            # 通话开始
+            if self.video_invite_dlg and self.video_invite_dlg.isVisible():
+                self.video_invite_dlg.close()
+            self.video_invite_dlg = None
+
+            self.video_chat_window = VideoChatWindow(
+                self, self.tcp, self.nick, self.tcp.host
+            )
+            self.video_chat_window.update_members(d["players"])
+            self.video_chat_window.show()
+            self.video_chat_window.start_stream()
 
         elif cmd == "member_leave":
+            # 成员离开
             if self.video_chat_window and self.video_chat_window.isVisible():
-                self.video_chat_window.update_members(d["members"])
+                self.video_chat_window.update_members(d["players"])
 
         elif cmd == "call_end":
+            # 通话结束
             if self.video_chat_window and self.video_chat_window.isVisible():
                 self.video_chat_window.close()
-            if self.video_invite_dlg and self.video_invite_dlg.isVisible():
-                self.video_invite_dlg.close()
             self.video_chat_window = None
             self.video_invite_dlg = None
-            QMessageBox.information(self, "提示", "通话已结束")
+            QMessageBox.information(self, "提示", d.get("msg", "通话已结束"))

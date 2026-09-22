@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# @FileName : protocol.py.py
+# @FileName : protocol.py
 # @Author   : Tsing Sai
 # @Time     : 2026/9/21 22:22
 import struct
@@ -23,11 +23,15 @@ MSG_TYPE_VIDEO_STATUS = 10
 VIDEO_PORT_UDP = 8081
 VIDEO_TYPE_AV = "av"
 
+# 响应状态
+RESPONSE_PENDING = "pending"
+RESPONSE_ACCEPT = "accept"
+RESPONSE_REJECT = "reject"
+
 # UDP媒体帧常量
 VIDEO_FRAME_AUDIO = 0
 VIDEO_FRAME_VIDEO = 1
 VIDEO_NICK_BYTES = 16
-VIDEO_PORT_UDP = 8081
 
 
 def pack_msg(msg_type, payload):

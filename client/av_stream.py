@@ -15,8 +15,10 @@ from .protocol import (
 
 
 class AVStream(QObject):
-    # 视频帧信号：发送者昵称 + 画面数据
+    # 远程视频帧信号：发送者昵称 + 画面数据
     video_frame_signal = pyqtSignal(str, np.ndarray)
+    # 本地预览信号：本地摄像头画面
+    local_video_signal = pyqtSignal(np.ndarray)
 
     def __init__(self, server_host, nickname):
         super().__init__()
@@ -36,20 +38,30 @@ class AVStream(QObject):
         self.audio_output = None
         self.sample_rate = 16000
         self.channels = 1
+        self.muted_nicks = set()  # 本地静音的参与者昵称列表
+
+    def set_mute(self, nick, mute):
+        """设置指定参与者是否静音"""
+        if mute:
+            self.muted_nicks.add(nick)
+        else:
+            self.muted_nicks.discard(nick)
 
     def _pack_frame(self, frame_type, data):
-        # 秒级时间戳，32位无符号足够容纳，避免溢出
         timestamp = struct.pack(">I", int(time.time()))
         return self.nick_bytes + struct.pack("B", frame_type) + timestamp + data
 
-
     def _video_send_loop(self):
-        """视频采集发送线程"""
+        """视频采集发送线程，同时输出本地预览"""
         self.cap = cv2.VideoCapture(0)
         while self.running:
             ret, frame = self.cap.read()
             if not ret:
                 break
+            # 发送本地预览信号（拷贝数据，避免多线程冲突）
+            self.local_video_signal.emit(frame.copy())
+
+            # 编码并发送
             ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
             if not ret:
                 continue
@@ -85,7 +97,7 @@ class AVStream(QObject):
             # 解析包头
             sender_nick = data[:VIDEO_NICK_BYTES].decode("utf-8").rstrip("\x00")
             frame_type = data[VIDEO_NICK_BYTES]
-            payload = data[VIDEO_NICK_BYTES + 5:]  # 跳过1字节类型+4字节时间戳
+            payload = data[VIDEO_NICK_BYTES + 5:]
 
             if frame_type == VIDEO_FRAME_VIDEO:
                 # 视频：解码后发信号给UI渲染
@@ -98,7 +110,9 @@ class AVStream(QObject):
                     pass
 
             elif frame_type == VIDEO_FRAME_AUDIO:
-                # 音频：直接写入播放流
+                # 音频：检查静音列表，静音则跳过播放
+                if sender_nick in self.muted_nicks:
+                    continue
                 if self.audio_output and self.running:
                     try:
                         audio_data = np.frombuffer(payload, dtype=np.int16)
@@ -137,7 +151,8 @@ class AVStream(QObject):
 
     def stop(self):
         self.running = False
-        # 先关闭UDP socket，强制打断阻塞的recvfrom，让接收线程退出
+        self.muted_nicks.clear()
+        # 先关闭UDP套接字，强制打断阻塞接收
         try:
             self.udp_sock.close()
         except Exception:

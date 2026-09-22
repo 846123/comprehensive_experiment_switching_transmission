@@ -1,18 +1,17 @@
-# -*- coding: utf-8 -*-
-# @FileName : main.py.py
-# @Author   : Tsing Sai
-# @Time     : 2026/9/21 22:17
 import asyncio
 from .connection import ClientManager, handle_client
 from .chat import broadcast_text, handle_chat_message
 from .minesweeper import MinesweeperRoom
 from .file_transfer import FileTransferManager
+from .video_chat import VideoChatRoom
+from .protocol import VIDEO_PORT_UDP
 
 
 async def main():
     client_manager = ClientManager()
     ms_room = MinesweeperRoom(client_manager)
     file_manager = FileTransferManager(client_manager)
+    video_room = VideoChatRoom(client_manager)
     await file_manager.init_lock()
 
     async def chat_handler(*args, **kwargs):
@@ -33,8 +32,12 @@ async def main():
     async def file_end_handler(payload, writer):
         await file_manager.handle_end(payload, writer)
 
+    async def video_handler(data, nick, writer):
+        await video_room.handle_command(data, nick, writer)
+
     async def on_client_cleanup(nickname, writer):
         await ms_room.on_client_leave(nickname, writer)
+        await video_room.on_client_leave(nickname, writer)
         if file_manager.is_sender(writer):
             await file_manager.abort_current()
 
@@ -47,12 +50,16 @@ async def main():
                 ms_handler,
                 file_info_handler,
                 file_chunk_handler,
-                file_end_handler
+                file_end_handler,
+                video_handler
             )
         finally:
             nickname = client_manager.get_nick(writer)
             if nickname:
                 await on_client_cleanup(nickname, writer)
+
+    # 启动UDP音视频中继（必须在serve_forever之前启动）
+    asyncio.create_task(video_room.udp_relay(VIDEO_PORT_UDP))
 
     server = await asyncio.start_server(wrapped_handle_client, "0.0.0.0", 8080)
     print("Server running on 0.0.0.0:8080")

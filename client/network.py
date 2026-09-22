@@ -12,7 +12,8 @@ from .protocol import (
     pack_file_chunk, unpack_file_chunk,
     MSG_TYPE_CHAT, MSG_TYPE_MINESWEEPER,
     MSG_TYPE_FILE_INFO, MSG_TYPE_FILE_CHUNK, MSG_TYPE_FILE_END,
-    FILE_CHUNK_SIZE
+    FILE_CHUNK_SIZE,
+    MSG_TYPE_VIDEO_INVITE, MSG_TYPE_VIDEO_STATUS
 )
 
 
@@ -22,6 +23,7 @@ class TcpClientThread(QThread):
     connected_signal = pyqtSignal()
     fail_signal = pyqtSignal(str)
     disconnect_signal = pyqtSignal()
+    video_signal = pyqtSignal(dict)
 
     file_info_signal = pyqtSignal(str, str, str, int)  # file_id, sender, filename, file_size
     file_chunk_signal = pyqtSignal(str, int, bytes)  # file_id, offset, data
@@ -85,6 +87,9 @@ class TcpClientThread(QThread):
                             info["file_id"], info["status"],
                             info.get("msg", "")
                         )
+                    elif mt == MSG_TYPE_VIDEO_STATUS:
+                        obj = json.loads(payload.decode("utf-8"))
+                        self.video_signal.emit(obj)
             self.sock.close()
         except socket.error as e:
             self.fail_signal.emit(str(e))
@@ -120,9 +125,9 @@ class TcpClientThread(QThread):
         except socket.error as e:
             print("send err", e)
 
-    def send_json(self, obj):
+    def send_json(self, obj, msg_type=MSG_TYPE_MINESWEEPER):
         raw = json.dumps(obj).encode("utf-8")
-        pkt = pack_msg(MSG_TYPE_MINESWEEPER, raw)
+        pkt = pack_msg(msg_type, raw)
         try:
             if self.sock:
                 self.sock.sendall(pkt)

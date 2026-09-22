@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-# @FileName : connection.py.py
+# @FileName : connection.py
 # @Author   : Tsing Sai
 # @Time     : 2026/9/21 22:18
 import json
 from .protocol import (
-    pack_msg, unpack_header,
+    unpack_header,
     MSG_TYPE_CHAT, MSG_TYPE_MINESWEEPER,
-    MSG_TYPE_FILE_INFO, MSG_TYPE_FILE_CHUNK, MSG_TYPE_FILE_END
+    MSG_TYPE_FILE_INFO, MSG_TYPE_FILE_CHUNK, MSG_TYPE_FILE_END,
+    MSG_TYPE_VIDEO_INVITE
 )
 
 
@@ -58,7 +59,8 @@ async def handle_client(
     minesweeper_handler,
     file_info_handler,
     file_chunk_handler,
-    file_end_handler
+    file_end_handler,
+    video_handler
 ):
     addr = writer.get_extra_info('peername')
     ip, port = addr
@@ -110,6 +112,12 @@ async def handle_client(
                     await file_chunk_handler(payload, writer)
                 elif mt == MSG_TYPE_FILE_END:
                     await file_end_handler(payload, writer)
+                elif mt == MSG_TYPE_VIDEO_INVITE:
+                    try:
+                        data = json.loads(payload.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        continue
+                    await video_handler(data, nickname, writer)
     except Exception as e:
         print(f"[错误] {nickname} 连接异常：{e}")
     finally:

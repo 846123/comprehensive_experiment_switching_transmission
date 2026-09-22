@@ -7,13 +7,15 @@ from PyQt6.QtWidgets import (
 )
 
 from .widgets.msg_bubble import MsgBubbleWidget
-from .widgets.video_invite import VideoInvitePopup
 from .widgets.minesweeper.invite_dialog import MinesweeperInviteDialog
 from .widgets.minesweeper.result_dialog import GameResultDialog
 from .widgets.minesweeper.game_window import MinesweeperWindow
 from .widgets.file_transfer.send_progress import FileSendProgressDialog
 from .widgets.file_transfer.receive_dialog import FileReceiveDialog
 from .widgets.file_transfer.receive_progress import FileReceiveProgressDialog
+from .widgets.video_chat.invite_dialog import VideoInviteDialog
+from .widgets.video_chat.chat_window import VideoChatWindow
+from .protocol import MSG_TYPE_VIDEO_INVITE
 
 
 class ChatMainWindow(QMainWindow):
@@ -33,6 +35,10 @@ class ChatMainWindow(QMainWindow):
         self.current_recv_file_id = ""
         self.current_recv_file_size = 0
         self.current_recv_filename = ""
+        self.video_invite_dlg = None
+        self.video_chat_window = None
+
+        self.tcp.video_signal.connect(self.on_video_event)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -80,7 +86,7 @@ class ChatMainWindow(QMainWindow):
         self.btn_send.clicked.connect(self.send_msg)
         self.msg_input.returnPressed.connect(self.send_msg)
         self.btn_ms.clicked.connect(self.open_minesweeper)
-        self.btn_video.clicked.connect(self.open_video)
+        self.btn_video.clicked.connect(self.open_video_chat)
         self.btn_file.clicked.connect(self.send_file)
 
     def resizeEvent(self, event):
@@ -199,10 +205,6 @@ class ChatMainWindow(QMainWindow):
                 self.ms_window.close()
             QMessageBox.information(self, "提示", d.get("msg", "游戏中止"))
 
-    def open_video(self):
-        dlg = VideoInvitePopup(self)
-        dlg.exec()
-
     # ========== 文件传输功能 ==========
     def send_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择文件")
@@ -286,3 +288,59 @@ class ChatMainWindow(QMainWindow):
     def closeEvent(self, event):
         self.tcp.close_conn()
         event.accept()
+
+    # ========== 音视频通话功能 ==========
+    def open_video_chat(self):
+        self.tcp.send_json({"cmd": "call"}, MSG_TYPE_VIDEO_INVITE)
+        # 自己作为发起人先弹出等待窗
+        self.video_invite_dlg = VideoInviteDialog(self, self.nick, self.nick, self.tcp)
+        self.video_invite_dlg.show()
+
+    def on_video_event(self, d):
+        cmd = d.get("cmd")
+
+        if cmd == "incoming_call":
+            # 收到来电
+            if self.video_invite_dlg and self.video_invite_dlg.isVisible():
+                return
+            if self.video_chat_window and self.video_chat_window.isVisible():
+                # 已在通话中，直接加入
+                self.tcp.send_json({"cmd": "accept"}, MSG_TYPE_VIDEO_INVITE)
+                return
+
+            self.video_invite_dlg = VideoInviteDialog(
+                self, d["caller"], self.nick, self.tcp
+            )
+            # 接受后打开通话窗口
+            if self.video_invite_dlg.exec() == QDialog.DialogCode.Accepted:
+                self.video_chat_window = VideoChatWindow(
+                    self, self.tcp, self.nick, self.tcp.host
+                )
+                self.video_chat_window.show()
+                self.video_chat_window.start_stream()
+
+        elif cmd == "member_join":
+            if self.video_chat_window and self.video_chat_window.isVisible():
+                self.video_chat_window.update_members(d["members"])
+            if self.video_invite_dlg and self.video_invite_dlg.isVisible():
+                self.video_invite_dlg.close()
+                # 发起人看到有人加入后自动打开通话窗口
+                if not self.video_chat_window:
+                    self.video_chat_window = VideoChatWindow(
+                        self, self.tcp, self.nick, self.tcp.host
+                    )
+                    self.video_chat_window.show()
+                    self.video_chat_window.start_stream()
+
+        elif cmd == "member_leave":
+            if self.video_chat_window and self.video_chat_window.isVisible():
+                self.video_chat_window.update_members(d["members"])
+
+        elif cmd == "call_end":
+            if self.video_chat_window and self.video_chat_window.isVisible():
+                self.video_chat_window.close()
+            if self.video_invite_dlg and self.video_invite_dlg.isVisible():
+                self.video_invite_dlg.close()
+            self.video_chat_window = None
+            self.video_invite_dlg = None
+            QMessageBox.information(self, "提示", "通话已结束")

@@ -15,6 +15,20 @@ MSG_TYPE_FILE_END = 7
 FILE_CHUNK_SIZE = 4096
 FILE_ID_LEN = 32
 
+# ========== 音视频通话常量 ==========
+MSG_TYPE_VIDEO_INVITE = 8
+MSG_TYPE_VIDEO_REPLY = 9
+MSG_TYPE_VIDEO_STATUS = 10
+
+VIDEO_PORT_UDP = 8081
+VIDEO_TYPE_AV = "av"
+
+# UDP媒体帧常量
+VIDEO_FRAME_AUDIO = 0
+VIDEO_FRAME_VIDEO = 1
+VIDEO_NICK_BYTES = 16
+VIDEO_PORT_UDP = 8081
+
 
 def pack_msg(msg_type, payload):
     return struct.pack(">HIH", msg_type, len(payload), 0) + payload

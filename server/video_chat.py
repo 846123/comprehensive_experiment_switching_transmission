@@ -228,6 +228,30 @@ class VideoChatRoom:
             print(f"[视频] {nick} 取消了视频邀请")
             self.reset()
 
+        elif cmd == "mute":
+            # 自己开启麦克风静音
+            if self.state != VIDEO_STATE_CHATTING:
+                return
+            if nick not in self.chat_nick_set:
+                return
+            await self.broadcast_to_chat({
+                "cmd": "mute_status",
+                "nick": nick,
+                "muted": True
+            })
+
+        elif cmd == "unmute":
+            # 自己取消麦克风静音
+            if self.state != VIDEO_STATE_CHATTING:
+                return
+            if nick not in self.chat_nick_set:
+                return
+            await self.broadcast_to_chat({
+                "cmd": "mute_status",
+                "nick": nick,
+                "muted": False
+            })
+
         elif cmd == "hangup":
             if self.state != VIDEO_STATE_CHATTING:
                 return

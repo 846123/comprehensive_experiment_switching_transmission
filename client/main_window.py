@@ -162,10 +162,10 @@ class ChatMainWindow(QMainWindow):
             QMessageBox.information(self, "提示", d.get("msg", "邀请已取消"))
 
         elif cmd == "busy":
-            QMessageBox.warning(self, "提示", "当前已有游戏进行中")
+            QMessageBox.warning(self, "提示", d.get("msg", "当前已有游戏进行中"))
 
         elif cmd == "full":
-            QMessageBox.warning(self, "提示", "游戏人数已满")
+            QMessageBox.warning(self, "提示", d.get("msg", "游戏人数已满"))
 
         elif cmd == "start":
             if self.invite_dialog and self.invite_dialog.isVisible():
@@ -336,6 +336,11 @@ class ChatMainWindow(QMainWindow):
             self.video_chat_window.update_members(d["players"])
             self.video_chat_window.show()
             self.video_chat_window.start_stream()
+
+        elif cmd == "mute_status":
+            # 成员静音状态更新
+            if self.video_chat_window and self.video_chat_window.isVisible():
+                self.video_chat_window.update_mute_status(d["nick"], d["muted"])
 
         elif cmd == "member_leave":
             # 成员离开

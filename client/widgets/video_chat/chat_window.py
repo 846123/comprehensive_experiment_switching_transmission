@@ -24,13 +24,33 @@ class VideoChatWindow(QDialog):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
 
-        # 上半部分：本地大画面预览
+        # 上半部分：本地大画面预览（带静音标识）
+        self.local_container = QWidget()
+        self.local_container.setStyleSheet("background-color:#000;")
+        local_layout = QVBoxLayout(self.local_container)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+
         self.local_video = QLabel("摄像头启动中...")
         self.local_video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.local_video.setStyleSheet("background-color:#000; color:#888; font-size:14px;")
+        self.local_video.setStyleSheet("color:#888; font-size:14px;")
         self.local_video.setMinimumHeight(440)
         self.local_video.setScaledContents(True)
-        main_layout.addWidget(self.local_video, stretch=3)
+
+        # 本地静音标识（右上角）
+        self.local_mute_label = QLabel("麦克风已关闭")
+        self.local_mute_label.setParent(self.local_video)
+        self.local_mute_label.setStyleSheet("""
+            color:white; 
+            background-color:rgba(220,0,0,0.8); 
+            padding:4px 8px;
+            font-size:12px;
+            border-radius:4px;
+        """)
+        self.local_mute_label.move(10, 10)
+        self.local_mute_label.hide()
+
+        local_layout.addWidget(self.local_video)
+        main_layout.addWidget(self.local_container, stretch=3)
 
         # 下半部分：远程参与者视频列表（横向滚动）
         scroll_area = QScrollArea()
@@ -38,7 +58,7 @@ class VideoChatWindow(QDialog):
         scroll_area.setStyleSheet("border:none; background:#111;")
         scroll_content = QWidget()
         self.remote_layout = QHBoxLayout(scroll_content)
-        self.remote_layout.setSpacing(8)
+        self.remote_layout.setSpacing(10)
         self.remote_layout.addStretch(1)
         scroll_area.setWidget(scroll_content)
         main_layout.addWidget(scroll_area, stretch=2)
@@ -47,6 +67,23 @@ class VideoChatWindow(QDialog):
         bottom_bar = QHBoxLayout()
         self.member_label = QLabel("成员：0人")
         self.member_label.setStyleSheet("color:#fff;")
+
+        self.btn_mute = QPushButton("静音")
+        self.btn_mute.setFixedWidth(80)
+        self.btn_mute.setStyleSheet("""
+            QPushButton {
+                background-color:#333;
+                color:white;
+                padding:6px;
+                border:1px solid #555;
+                border-radius:3px;
+            }
+            QPushButton:hover {
+                background-color:#444;
+            }
+        """)
+        self.btn_mute.clicked.connect(self._toggle_self_mute)
+
         self.btn_hangup = QPushButton("挂断")
         self.btn_hangup.setFixedWidth(100)
         self.btn_hangup.setStyleSheet("background-color:#d00; color:white; padding:6px;")
@@ -54,6 +91,7 @@ class VideoChatWindow(QDialog):
 
         bottom_bar.addWidget(self.member_label)
         bottom_bar.addStretch(1)
+        bottom_bar.addWidget(self.btn_mute)
         bottom_bar.addWidget(self.btn_hangup)
         main_layout.addLayout(bottom_bar)
 
@@ -69,7 +107,7 @@ class VideoChatWindow(QDialog):
         self.av_stream.start()
 
     def _on_local_frame(self, frame):
-        """渲染本地大画面（镜像显示，符合自拍习惯）"""
+        """渲染本地大画面（镜像显示）"""
         mirror_frame = cv2.flip(frame, 1)
         rgb_frame = cv2.cvtColor(mirror_frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
@@ -87,7 +125,7 @@ class VideoChatWindow(QDialog):
         video_label.setPixmap(QPixmap.fromImage(q_img))
 
     def update_members(self, members):
-        """更新成员列表，动态添加/移除远程视频窗口"""
+        """更新成员列表，动态增删视频窗口"""
         self.member_label.setText(f"成员：{len(members)}人")
         remote_nicks = [n for n in members if n != self.my_nick]
 
@@ -103,56 +141,104 @@ class VideoChatWindow(QDialog):
                 continue
             self._add_remote_widget(nick)
 
+    def update_mute_status(self, nick, muted):
+        """更新指定参与者的静音标识"""
+        if nick == self.my_nick:
+            # 更新本地大画面的静音标识
+            self.local_mute_label.setVisible(muted)
+            return
+        if nick in self.remote_widgets:
+            self.remote_widgets[nick]["mute_label"].setVisible(muted)
+
     def _add_remote_widget(self, nick):
-        """添加一个远程参与者的视频卡片（带独立静音按钮）"""
+        """添加一个远程参与者的视频卡片（带静音标识）"""
         container = QWidget()
-        container.setFixedWidth(150)
+        container.setFixedWidth(180)
         v_layout = QVBoxLayout(container)
-        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setContentsMargins(4, 4, 4, 4)
         v_layout.setSpacing(4)
 
-        # 视频画面
+        # 视频画面容器
+        video_container = QWidget()
+        video_container.setStyleSheet("background-color:#000;")
+        video_layout = QVBoxLayout(video_container)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+
         video_label = QLabel("等待画面...")
         video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        video_label.setStyleSheet("background-color:#000; color:#666; font-size:11px;")
-        video_label.setFixedHeight(110)
+        video_label.setStyleSheet("color:#666; font-size:11px;")
+        video_label.setFixedHeight(120)
         video_label.setScaledContents(True)
-        v_layout.addWidget(video_label)
 
-        # 底部：昵称 + 静音按钮
-        bottom = QHBoxLayout()
+        # 远程静音标识
+        mute_label = QLabel("静音中")
+        mute_label.setParent(video_label)
+        mute_label.setStyleSheet("""
+            color:white;
+            background-color:rgba(220,0,0,0.8);
+            padding:2px 6px;
+            font-size:11px;
+            border-radius:3px;
+        """)
+        mute_label.move(5, 5)
+        mute_label.hide()
+
+        video_layout.addWidget(video_label)
+        v_layout.addWidget(video_container)
+
+        # 底部昵称
         nick_label = QLabel(nick)
         nick_label.setStyleSheet("color:#fff; font-size:12px;")
-        mute_btn = QPushButton("静音")
-        mute_btn.setFixedHeight(22)
-        mute_btn.setStyleSheet("font-size:11px;")
-        mute_btn.clicked.connect(lambda: self._toggle_mute(nick, mute_btn))
-
-        bottom.addWidget(nick_label)
-        bottom.addStretch(1)
-        bottom.addWidget(mute_btn)
-        v_layout.addLayout(bottom)
+        v_layout.addWidget(nick_label)
 
         self.remote_layout.insertWidget(0, container)
         self.remote_widgets[nick] = {
             "container": container,
             "video": video_label,
-            "mute_btn": mute_btn,
-            "muted": False
+            "mute_label": mute_label
         }
 
-    def _toggle_mute(self, nick, btn):
-        """切换指定参与者的静音状态，本地生效不影响他人"""
-        info = self.remote_widgets[nick]
-        info["muted"] = not info["muted"]
-        self.av_stream.set_mute(nick, info["muted"])
+    def _toggle_self_mute(self):
+        """切换自身麦克风静音状态"""
+        if not self.av_stream:
+            return
+        current_muted = self.av_stream.self_muted
+        new_muted = not current_muted
+        self.av_stream.set_self_mute(new_muted)
 
-        if info["muted"]:
-            btn.setText("取消静音")
-            btn.setStyleSheet("font-size:11px; background-color:#d00; color:white;")
+        # 发送状态同步指令
+        cmd = "mute" if new_muted else "unmute"
+        self.tcp.send_json({"cmd": cmd}, MSG_TYPE_VIDEO_INVITE)
+
+        # 更新按钮样式
+        if new_muted:
+            self.btn_mute.setText("取消静音")
+            self.btn_mute.setStyleSheet("""
+                QPushButton {
+                    background-color:#d00;
+                    color:white;
+                    padding:6px;
+                    border:1px solid #f00;
+                    border-radius:3px;
+                }
+                QPushButton:hover {
+                    background-color:#e00;
+                }
+            """)
         else:
-            btn.setText("静音")
-            btn.setStyleSheet("font-size:11px;")
+            self.btn_mute.setText("静音")
+            self.btn_mute.setStyleSheet("""
+                QPushButton {
+                    background-color:#333;
+                    color:white;
+                    padding:6px;
+                    border:1px solid #555;
+                    border-radius:3px;
+                }
+                QPushButton:hover {
+                    background-color:#444;
+                }
+            """)
 
     def on_hangup(self):
         """挂断通话"""

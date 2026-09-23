@@ -13,22 +13,22 @@ class VideoChatWindow(QDialog):
     def __init__(self, parent, tcp, my_nick, server_host):
         super().__init__(parent)
         self.setWindowTitle("音视频通话")
-        self.resize(900, 680)
+        self.resize(960, 700)
         self.tcp = tcp
         self.my_nick = my_nick
         self.server_host = server_host
         self.av_stream = None
-        self.remote_widgets = {}  # 存储远程参与者控件：nick -> {"video": label, "mute_btn": btn}
+        self.remote_widgets = {}  # 存储远程参与者控件
 
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
 
         # 上半部分：本地大画面预览
-        self.local_video = QLabel("等待摄像头启动...")
+        self.local_video = QLabel("摄像头启动中...")
         self.local_video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.local_video.setStyleSheet("background-color:#000; color:#fff;")
-        self.local_video.setMinimumHeight(420)
+        self.local_video.setStyleSheet("background-color:#000; color:#888; font-size:14px;")
+        self.local_video.setMinimumHeight(440)
         self.local_video.setScaledContents(True)
         main_layout.addWidget(self.local_video, stretch=3)
 
@@ -46,6 +46,7 @@ class VideoChatWindow(QDialog):
         # 底部状态栏
         bottom_bar = QHBoxLayout()
         self.member_label = QLabel("成员：0人")
+        self.member_label.setStyleSheet("color:#fff;")
         self.btn_hangup = QPushButton("挂断")
         self.btn_hangup.setFixedWidth(100)
         self.btn_hangup.setStyleSheet("background-color:#d00; color:white; padding:6px;")
@@ -63,11 +64,9 @@ class VideoChatWindow(QDialog):
         if self.av_stream:
             return
         self.av_stream = AVStream(self.server_host, self.my_nick)
-        # 绑定本地预览和远程视频信号
         self.av_stream.local_video_signal.connect(self._on_local_frame)
         self.av_stream.video_frame_signal.connect(self._on_remote_frame)
         self.av_stream.start()
-        self.local_video.setText("")
 
     def _on_local_frame(self, frame):
         """渲染本地大画面（镜像显示，符合自拍习惯）"""
@@ -107,7 +106,7 @@ class VideoChatWindow(QDialog):
     def _add_remote_widget(self, nick):
         """添加一个远程参与者的视频卡片"""
         container = QWidget()
-        container.setFixedWidth(160)
+        container.setFixedWidth(150)
         v_layout = QVBoxLayout(container)
         v_layout.setContentsMargins(0, 0, 0, 0)
         v_layout.setSpacing(4)
@@ -115,8 +114,8 @@ class VideoChatWindow(QDialog):
         # 视频画面
         video_label = QLabel("等待画面...")
         video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        video_label.setStyleSheet("background-color:#000; color:#888;")
-        video_label.setFixedHeight(120)
+        video_label.setStyleSheet("background-color:#000; color:#666; font-size:11px;")
+        video_label.setFixedHeight(110)
         video_label.setScaledContents(True)
         v_layout.addWidget(video_label)
 
@@ -125,7 +124,7 @@ class VideoChatWindow(QDialog):
         nick_label = QLabel(nick)
         nick_label.setStyleSheet("color:#fff; font-size:12px;")
         mute_btn = QPushButton("静音")
-        mute_btn.setFixedHeight(24)
+        mute_btn.setFixedHeight(22)
         mute_btn.setStyleSheet("font-size:11px;")
         mute_btn.clicked.connect(lambda: self._toggle_mute(nick, mute_btn))
 
@@ -134,7 +133,6 @@ class VideoChatWindow(QDialog):
         bottom.addWidget(mute_btn)
         v_layout.addLayout(bottom)
 
-        # 插入到布局最前面
         self.remote_layout.insertWidget(0, container)
         self.remote_widgets[nick] = {
             "container": container,

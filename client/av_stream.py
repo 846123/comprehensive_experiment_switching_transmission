@@ -41,12 +41,15 @@ class AVStream(QObject):
         self.channels = 1
         self.self_muted = False  # 自身麦克风静音状态
 
-        # 音频队列解耦
+        # 音频队列
         self.audio_send_queue = deque()
         self.audio_send_thread = None
         self.audio_recv_queue = deque()
         self.audio_play_thread = None
-        self._buffer_size = 3200  # 约200ms音频缓冲
+
+        # 自适应缓冲配置
+        self._target_buffer = 1600  # 目标缓冲100ms，降低延迟
+        self._max_buffer = 4800  # 最大缓冲300ms，超过就丢包防堆积
 
     def set_self_mute(self, mute):
         """设置自身麦克风是否静音"""
@@ -77,47 +80,58 @@ class AVStream(QObject):
         self.cap.release()
 
     def _audio_input_callback(self, indata, frames, time_info, status):
-        """音频采集回调：静音时直接丢弃，不发送"""
+        """音频采集回调：静音时直接丢弃"""
         if not self.running or self.self_muted:
             return
         pkt = self._pack_frame(VIDEO_FRAME_AUDIO, indata.tobytes())
         self.audio_send_queue.append(pkt)
 
     def _audio_send_loop(self):
-        """音频发送独立线程"""
+        """音频发送独立线程：批量发送，减少系统调用"""
         while self.running:
             if self.audio_send_queue:
-                data = self.audio_send_queue.popleft()
-                try:
-                    self.udp_sock.sendto(data, (self.server_host, VIDEO_PORT_UDP))
-                except Exception:
-                    pass
+                # 批量取出所有待发送数据，一次性发送
+                while self.audio_send_queue:
+                    data = self.audio_send_queue.popleft()
+                    try:
+                        self.udp_sock.sendto(data, (self.server_host, VIDEO_PORT_UDP))
+                    except Exception:
+                        pass
             else:
                 time.sleep(0.005)
 
     def _audio_play_loop(self):
-        """音频播放独立线程：带缓冲"""
+        """音频播放线程：自适应缓冲，防堆积防爆音"""
         play_buffer = b""
         while self.running:
-            if self.audio_recv_queue:
-                payload = self.audio_recv_queue.popleft()
-                try:
-                    play_buffer += payload
-                    if len(play_buffer) >= self._buffer_size * 2:
-                        chunk = play_buffer[:self._buffer_size * 2]
-                        play_buffer = play_buffer[self._buffer_size * 2:]
-                        if self.audio_output:
-                            audio_data = np.frombuffer(chunk, dtype=np.int16)
-                            self.audio_output.write(audio_data)
-                except Exception:
-                    pass
+            # 先把队列里所有数据取出来
+            while self.audio_recv_queue:
+                play_buffer += self.audio_recv_queue.popleft()
+
+            # 缓冲超过上限，丢弃最旧的数据，防止延迟无限累积
+            if len(play_buffer) > self._max_buffer * 2:
+                play_buffer = play_buffer[-self._target_buffer * 2:]
+
+            # 达到目标缓冲量就播放
+            if len(play_buffer) >= self._target_buffer * 2:
+                chunk = play_buffer[:self._target_buffer * 2]
+                play_buffer = play_buffer[self._target_buffer * 2:]
+                if self.audio_output:
+                    try:
+                        audio_data = np.frombuffer(chunk, dtype=np.int16)
+                        # 简单限幅，防止爆音
+                        audio_data = np.clip(audio_data, -30000, 30000)
+                        self.audio_output.write(audio_data)
+                    except Exception:
+                        pass
             else:
+                # 缓冲不足补少量静音，平滑过渡
                 time.sleep(0.005)
-                if len(play_buffer) < self._buffer_size:
-                    play_buffer += b"\x00\x00" * 160
+                if len(play_buffer) < self._target_buffer:
+                    play_buffer += b"\x00\x00" * 80
 
     def _recv_loop(self):
-        """UDP接收线程：音视频分流，所有远程音频正常播放"""
+        """UDP接收线程：音视频分流"""
         while self.running:
             try:
                 data, _ = self.udp_sock.recvfrom(65535)
@@ -141,7 +155,6 @@ class AVStream(QObject):
                     pass
 
             elif frame_type == VIDEO_FRAME_AUDIO:
-                # 所有远程音频直接进入播放队列
                 self.audio_recv_queue.append(payload)
 
     def start(self):
@@ -156,6 +169,7 @@ class AVStream(QObject):
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",
+            blocksize=320,  # 减小采集块大小，降低延迟
             callback=self._audio_input_callback
         )
         self.audio_input.start()
@@ -163,7 +177,8 @@ class AVStream(QObject):
         self.audio_output = sd.OutputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
-            dtype="int16"
+            dtype="int16",
+            blocksize=320  # 减小播放块大小，更平滑
         )
         self.audio_output.start()
 

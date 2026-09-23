@@ -106,7 +106,7 @@ class VideoChatRoom:
             self.reset()
 
     async def udp_relay(self, port):
-        """UDP媒体流中继（优化版）"""
+        """UDP媒体流中继（批量转发优化版）"""
         loop = asyncio.get_running_loop()
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.bind(("0.0.0.0", port))
@@ -124,22 +124,27 @@ class VideoChatRoom:
             sender_nick = data[:VIDEO_NICK_BYTES].decode("utf-8").rstrip("\x00")
             self.udp_addresses[sender_nick] = addr
 
-            # 非通话状态直接丢弃，不处理
+            # 非通话状态直接丢弃
             if self.state != VIDEO_STATE_CHATTING:
                 continue
             if sender_nick not in self.chat_nick_set:
                 continue
 
-            # 批量转发给其他通话成员
+            # 预构建目标列表，批量转发
+            targets = []
             for nick in self.chat_nick_set:
                 if nick == sender_nick:
                     continue
                 target_addr = self.udp_addresses.get(nick)
                 if target_addr:
-                    try:
-                        await loop.sock_sendto(self.udp_socket, data, target_addr)
-                    except Exception:
-                        continue
+                    targets.append(target_addr)
+
+            # 批量发送，减少循环开销
+            for target in targets:
+                try:
+                    await loop.sock_sendto(self.udp_socket, data, target)
+                except Exception:
+                    continue
 
     async def handle_command(self, data, nick, writer):
         cmd = data.get("cmd")

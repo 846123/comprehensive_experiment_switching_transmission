@@ -104,7 +104,7 @@ class VideoChatWindow(QDialog):
             self._add_remote_widget(nick)
 
     def _add_remote_widget(self, nick):
-        """添加一个远程参与者的视频卡片"""
+        """添加一个远程参与者的视频卡片（带独立静音按钮）"""
         container = QWidget()
         container.setFixedWidth(150)
         v_layout = QVBoxLayout(container)
@@ -142,15 +142,17 @@ class VideoChatWindow(QDialog):
         }
 
     def _toggle_mute(self, nick, btn):
-        """切换指定参与者的静音状态"""
+        """切换指定参与者的静音状态，本地生效不影响他人"""
         info = self.remote_widgets[nick]
         info["muted"] = not info["muted"]
         self.av_stream.set_mute(nick, info["muted"])
-        btn.setText("取消静音" if info["muted"] else "静音")
-        btn.setStyleSheet(
-            "font-size:11px; background-color:#d00; color:white;"
-            if info["muted"] else "font-size:11px;"
-        )
+
+        if info["muted"]:
+            btn.setText("取消静音")
+            btn.setStyleSheet("font-size:11px; background-color:#d00; color:white;")
+        else:
+            btn.setText("静音")
+            btn.setStyleSheet("font-size:11px;")
 
     def on_hangup(self):
         """挂断通话"""

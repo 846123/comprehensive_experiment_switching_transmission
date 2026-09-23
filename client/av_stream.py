@@ -49,7 +49,7 @@ class AVStream(QObject):
         self._buffer_size = 3200  # 约200ms音频缓冲（16kHz单声道int16）
 
     def set_mute(self, nick, mute):
-        """设置指定参与者是否静音"""
+        """设置指定参与者是否静音，True=静音 False=取消静音"""
         if mute:
             self.muted_nicks.add(nick)
         else:

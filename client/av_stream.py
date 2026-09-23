@@ -39,7 +39,8 @@ class AVStream(QObject):
         self.audio_output = None
         self.sample_rate = 16000
         self.channels = 1
-        self.self_muted = False  # 自身麦克风静音状态
+        self.self_muted = False  # 麦克风静音（发送端）
+        self.speaker_muted = False  # 听筒静音（接收端，纯本地）
 
         # 音频队列
         self.audio_send_queue = deque()
@@ -48,12 +49,19 @@ class AVStream(QObject):
         self.audio_play_thread = None
 
         # 自适应缓冲配置
-        self._target_buffer = 1600  # 目标缓冲100ms，降低延迟
-        self._max_buffer = 4800  # 最大缓冲300ms，超过就丢包防堆积
+        self._target_buffer = 1600  # 目标缓冲100ms
+        self._max_buffer = 4800  # 最大缓冲300ms
 
     def set_self_mute(self, mute):
-        """设置自身麦克风是否静音"""
+        """设置麦克风静音（控制发送）"""
         self.self_muted = mute
+
+    def set_speaker_mute(self, mute):
+        """设置听筒静音（控制本地播放，纯本地）"""
+        self.speaker_muted = mute
+        # 开启静音时立刻清空播放队列和缓冲，避免残留声音
+        if mute:
+            self.audio_recv_queue.clear()
 
     def _pack_frame(self, frame_type, data):
         timestamp = struct.pack(">I", int(time.time()))
@@ -80,17 +88,16 @@ class AVStream(QObject):
         self.cap.release()
 
     def _audio_input_callback(self, indata, frames, time_info, status):
-        """音频采集回调：静音时直接丢弃"""
+        """音频采集回调：麦克风静音时直接丢弃"""
         if not self.running or self.self_muted:
             return
         pkt = self._pack_frame(VIDEO_FRAME_AUDIO, indata.tobytes())
         self.audio_send_queue.append(pkt)
 
     def _audio_send_loop(self):
-        """音频发送独立线程：批量发送，减少系统调用"""
+        """音频发送独立线程"""
         while self.running:
             if self.audio_send_queue:
-                # 批量取出所有待发送数据，一次性发送
                 while self.audio_send_queue:
                     data = self.audio_send_queue.popleft()
                     try:
@@ -101,31 +108,36 @@ class AVStream(QObject):
                 time.sleep(0.005)
 
     def _audio_play_loop(self):
-        """音频播放线程：自适应缓冲，防堆积防爆音"""
+        """音频播放线程：听筒静音时不播放任何声音"""
         play_buffer = b""
         while self.running:
-            # 先把队列里所有数据取出来
+            # 听筒静音：清空队列，跳过播放
+            if self.speaker_muted:
+                self.audio_recv_queue.clear()
+                play_buffer = b""
+                time.sleep(0.01)
+                continue
+
+            # 取出所有接收数据
             while self.audio_recv_queue:
                 play_buffer += self.audio_recv_queue.popleft()
 
-            # 缓冲超过上限，丢弃最旧的数据，防止延迟无限累积
+            # 缓冲超限丢弃旧数据
             if len(play_buffer) > self._max_buffer * 2:
                 play_buffer = play_buffer[-self._target_buffer * 2:]
 
-            # 达到目标缓冲量就播放
+            # 达到目标量播放
             if len(play_buffer) >= self._target_buffer * 2:
                 chunk = play_buffer[:self._target_buffer * 2]
                 play_buffer = play_buffer[self._target_buffer * 2:]
                 if self.audio_output:
                     try:
                         audio_data = np.frombuffer(chunk, dtype=np.int16)
-                        # 简单限幅，防止爆音
-                        audio_data = np.clip(audio_data, -30000, 30000)
+                        audio_data = np.clip(audio_data, -3000, 3000)
                         self.audio_output.write(audio_data)
                     except Exception:
                         pass
             else:
-                # 缓冲不足补少量静音，平滑过渡
                 time.sleep(0.005)
                 if len(play_buffer) < self._target_buffer:
                     play_buffer += b"\x00\x00" * 80
@@ -169,7 +181,7 @@ class AVStream(QObject):
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",
-            blocksize=320,  # 减小采集块大小，降低延迟
+            blocksize=320,
             callback=self._audio_input_callback
         )
         self.audio_input.start()
@@ -178,7 +190,7 @@ class AVStream(QObject):
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",
-            blocksize=320  # 减小播放块大小，更平滑
+            blocksize=320
         )
         self.audio_output.start()
 
@@ -193,6 +205,7 @@ class AVStream(QObject):
     def stop(self):
         self.running = False
         self.self_muted = False
+        self.speaker_muted = False
         self.audio_send_queue.clear()
         self.audio_recv_queue.clear()
 

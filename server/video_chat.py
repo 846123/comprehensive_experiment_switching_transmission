@@ -234,7 +234,7 @@ class VideoChatRoom:
             self.reset()
 
         elif cmd == "mute":
-            # 自己开启麦克风静音
+            # 麦克风静音
             if self.state != VIDEO_STATE_CHATTING:
                 return
             if nick not in self.chat_nick_set:
@@ -246,13 +246,37 @@ class VideoChatRoom:
             })
 
         elif cmd == "unmute":
-            # 自己取消麦克风静音
+            # 取消麦克风静音
             if self.state != VIDEO_STATE_CHATTING:
                 return
             if nick not in self.chat_nick_set:
                 return
             await self.broadcast_to_chat({
                 "cmd": "mute_status",
+                "nick": nick,
+                "muted": False
+            })
+
+        elif cmd == "speaker_mute":
+            # 听筒静音
+            if self.state != VIDEO_STATE_CHATTING:
+                return
+            if nick not in self.chat_nick_set:
+                return
+            await self.broadcast_to_chat({
+                "cmd": "speaker_mute_status",
+                "nick": nick,
+                "muted": True
+            })
+
+        elif cmd == "speaker_unmute":
+            # 取消听筒静音
+            if self.state != VIDEO_STATE_CHATTING:
+                return
+            if nick not in self.chat_nick_set:
+                return
+            await self.broadcast_to_chat({
+                "cmd": "speaker_mute_status",
                 "nick": nick,
                 "muted": False
             })
@@ -279,6 +303,7 @@ class VideoChatRoom:
                     "nick": nick,
                     "players": list(self.chat_nick_set)
                 })
+
 
     async def on_client_leave(self, nickname, writer):
         if self.state == VIDEO_STATE_IDLE:

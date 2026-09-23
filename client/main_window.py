@@ -338,9 +338,14 @@ class ChatMainWindow(QMainWindow):
             self.video_chat_window.start_stream()
 
         elif cmd == "mute_status":
-            # 成员静音状态更新
+            # 成员麦克风状态更新
             if self.video_chat_window and self.video_chat_window.isVisible():
                 self.video_chat_window.update_mute_status(d["nick"], d["muted"])
+
+        elif cmd == "speaker_mute_status":
+            # 成员听筒状态更新
+            if self.video_chat_window and self.video_chat_window.isVisible():
+                self.video_chat_window.update_speaker_mute_status(d["nick"], d["muted"])
 
         elif cmd == "member_leave":
             # 成员离开
@@ -354,3 +359,4 @@ class ChatMainWindow(QMainWindow):
             self.video_chat_window = None
             self.video_invite_dlg = None
             QMessageBox.information(self, "提示", d.get("msg", "通话已结束"))
+

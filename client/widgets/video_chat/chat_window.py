@@ -1,7 +1,7 @@
 import cv2
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QWidget, QScrollArea
+    QWidget, QScrollArea, QGridLayout
 )
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtCore import Qt
@@ -24,11 +24,11 @@ class VideoChatWindow(QDialog):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
 
-        # 上半部分：本地大画面预览（带静音标识）
+        # 上半部分：本地大画面预览（网格布局叠加静音标识）
         self.local_container = QWidget()
         self.local_container.setStyleSheet("background-color:#000;")
-        local_layout = QVBoxLayout(self.local_container)
-        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_grid = QGridLayout(self.local_container)
+        local_grid.setContentsMargins(0, 0, 0, 0)
 
         self.local_video = QLabel("摄像头启动中...")
         self.local_video.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -36,20 +36,19 @@ class VideoChatWindow(QDialog):
         self.local_video.setMinimumHeight(440)
         self.local_video.setScaledContents(True)
 
-        # 本地静音标识（右上角）
+        # 本地静音标识（左上角，叠加在画面上层）
         self.local_mute_label = QLabel("麦克风已关闭")
-        self.local_mute_label.setParent(self.local_video)
         self.local_mute_label.setStyleSheet("""
             color:white; 
-            background-color:rgba(220,0,0,0.8); 
-            padding:4px 8px;
-            font-size:12px;
+            background-color:rgba(220,0,0,0.85); 
+            padding:4px 10px;
+            font-size:13px;
             border-radius:4px;
         """)
-        self.local_mute_label.move(10, 10)
         self.local_mute_label.hide()
 
-        local_layout.addWidget(self.local_video)
+        local_grid.addWidget(self.local_video, 0, 0)
+        local_grid.addWidget(self.local_mute_label, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         main_layout.addWidget(self.local_container, stretch=3)
 
         # 下半部分：远程参与者视频列表（横向滚动）
@@ -151,18 +150,18 @@ class VideoChatWindow(QDialog):
             self.remote_widgets[nick]["mute_label"].setVisible(muted)
 
     def _add_remote_widget(self, nick):
-        """添加一个远程参与者的视频卡片（带静音标识）"""
+        """添加一个远程参与者的视频卡片（网格布局叠加静音标识）"""
         container = QWidget()
         container.setFixedWidth(180)
         v_layout = QVBoxLayout(container)
         v_layout.setContentsMargins(4, 4, 4, 4)
         v_layout.setSpacing(4)
 
-        # 视频画面容器
+        # 视频画面容器（网格叠加静音标识）
         video_container = QWidget()
         video_container.setStyleSheet("background-color:#000;")
-        video_layout = QVBoxLayout(video_container)
-        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_grid = QGridLayout(video_container)
+        video_grid.setContentsMargins(0, 0, 0, 0)
 
         video_label = QLabel("等待画面...")
         video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -170,20 +169,19 @@ class VideoChatWindow(QDialog):
         video_label.setFixedHeight(120)
         video_label.setScaledContents(True)
 
-        # 远程静音标识
+        # 远程静音标识（左上角，叠加在画面上层）
         mute_label = QLabel("静音中")
-        mute_label.setParent(video_label)
         mute_label.setStyleSheet("""
             color:white;
-            background-color:rgba(220,0,0,0.8);
+            background-color:rgba(220,0,0,0.85);
             padding:2px 6px;
             font-size:11px;
             border-radius:3px;
         """)
-        mute_label.move(5, 5)
         mute_label.hide()
 
-        video_layout.addWidget(video_label)
+        video_grid.addWidget(video_label, 0, 0)
+        video_grid.addWidget(mute_label, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         v_layout.addWidget(video_container)
 
         # 底部昵称

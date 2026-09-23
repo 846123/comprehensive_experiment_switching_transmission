@@ -1,7 +1,9 @@
 # 《交换与传输综合实验》
 comprehensive_experiment_switching_transmission
+
 任课老师：张锐、张春霞
-项目实现：神、王
+
+项目实现：神
 
 ## 版本分支说明
 - `main` 分支：GUI 完整版，包含图形界面、多人音视频通话、多人扫雷游戏、文件传输完整功能

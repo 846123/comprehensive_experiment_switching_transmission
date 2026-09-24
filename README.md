@@ -118,7 +118,7 @@ comprehensive_experiment_switching_transmission/
 4.  **入口设计**：根目录 `run_*.py` 为打包专用入口，处理路径初始化后调用包内主逻辑；源码运行使用 `python -m server.main` / `python -m client.main` 即可。
 
 ## 运行说明
-### 打包前运行
+### 打包前(源码)运行
 1.  多台电脑接入**同一个局域网**，关闭 Windows 防火墙或放行 8080 端口 TCP、8081 端口 UDP 入站规则。
 2.  在服务端机器运行服务端：
 ```powershell
@@ -131,7 +131,7 @@ python -m client.main
 ```
 在弹出的登录窗口中输入服务端内网 IP 与自定义昵称，点击连接即可进入聊天室。
 
-### 源码状态运行
+### 打包后(.exe)运行
 1.  多台电脑接入**同一个局域网**，关闭 Windows 防火墙或放行 8080 端口 TCP、8081 端口 UDP 入站规则。
 2.  在服务端机器双击运行 `局域网聊天室服务端.exe` 启动服务端。
 3.  在客户端机器双击运行 `局域网聊天室客户端.exe`，在弹出的登录窗口中输入服务端内网 IP 与自定义昵称，点击连接即可进入聊天室。
@@ -168,5 +168,5 @@ pyinstaller -F -n 局域网聊天室服务端 run_client.py
 - `Source code`：项目原始Python源码
 
 ### GUI版
-- `default.zip`：Windows可执行程序包（server.exe、client.exe ）+ 实验文档 + python源码
+- `default.zip`：Windows可执行程序包（server.exe、client.exe ）
 - `Source code`：项目原始Python源码

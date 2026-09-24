@@ -1,6 +1,8 @@
 # 《交换与传输综合实验》
 comprehensive_experiment_switching_transmission
+
 任课老师：张锐、张春霞
+
 项目实现：剩菜
 
 ## 版本分支说明
@@ -111,6 +113,7 @@ pyinstaller -F -n 局域网聊天室服务端 run_client.py
 1.  传统的server、client两个python文件到开发的中后期会面临上千行代码，卡顿出现，可读性变差。所以重构代码，划分为server和client两个软件包等。
 2.  文本通信：想做到拉伸聊天窗口对话信息自适应扩张，失败；聊天信息多到刷屏时，没有自动滚屏功能，遗憾。
 3.  对于结构化的目录，创建脚本来进行打包。
+4.  多人在线视频卡顿，未解决。
 
 ## Release说明
 ### 终端版

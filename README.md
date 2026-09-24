@@ -1,7 +1,7 @@
 # 《交换与传输综合实验》
 comprehensive_experiment_switching_transmission
 任课老师：张锐、张春霞
-项目实现：神、王
+项目实现：剩菜
 
 ## 版本分支说明
 - `main` 分支：GUI 完整版，包含图形界面、多人音视频通话、多人扫雷游戏、文件传输完整功能
@@ -108,7 +108,9 @@ pyinstaller -F -n 局域网聊天室服务端 run_client.py
 5.  Windows防火墙会拦截局域网TCP连接，需要关闭专用网络防火墙或配置入站规则放行8080端口，否则两端无法建立通信。
 
 ### GUI版
-（待补充）
+1.  传统的server、client两个python文件到开发的中后期会面临上千行代码，卡顿出现，可读性变差。所以重构代码，划分为server和client两个软件包等。
+2.  文本通信：想做到拉伸聊天窗口对话信息自适应扩张，失败；聊天信息多到刷屏时，没有自动滚屏功能，遗憾。
+3.  对于结构化的目录，创建脚本来进行打包。
 
 ## Release说明
 ### 终端版
@@ -116,4 +118,5 @@ pyinstaller -F -n 局域网聊天室服务端 run_client.py
 - `Source code`：项目原始Python源码
 
 ### GUI版
-（待补充）
+- `default.zip`：Windows可执行程序包（server.exe、client.exe ）+ 实验文档 + python源码
+- `Source code`：项目原始Python源码

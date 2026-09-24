@@ -69,6 +69,54 @@ sounddevice
 PyQt6
 ```
 
+## 代码框架
+```
+comprehensive_experiment_switching_transmission/
+├── run_server.py              # 服务端打包入口脚本（pyinstaller 打包专用入口）
+├── run_client.py              # 客户端打包入口脚本（pyinstaller 打包专用入口）
+├── README.md                  # 项目说明文档
+├── server/                    # 服务端核心业务包
+│   ├── __init__.py
+│   ├── main.py                # 服务端主入口：初始化全局模块，启动 TCP 信令服务 + UDP 媒体中继
+│   ├── protocol.py            # 自定义应用层协议：消息类型常量、打包/解包工具函数
+│   ├── connection.py          # 连接管理层：客户端生命周期维护、全员/定向广播、消息分发入口
+│   ├── chat.py                # 文本聊天业务：消息格式化、全员广播转发
+│   ├── file_transfer.py       # 文件传输管理：全局单队列串行、流式中继转发、异常中止
+│   ├── minesweeper.py         # 多人扫雷房间：邀请/对局/结算完整状态机、回合制逻辑
+│   └── video_chat.py          # 音视频通话管理：邀请信令、状态同步、UDP 媒体流批量中继
+└── client/                    # 客户端核心包
+    ├── __init__.py
+    ├── main.py                # 客户端 GUI 启动入口
+    ├── protocol.py            # 客户端协议定义，与服务端完全对齐
+    ├── network.py             # TCP 网络线程：长连接维护、消息解析、Qt 信号分发
+    ├── av_stream.py           # 音视频流引擎：采集/编码/发送/接收/解码/播放全链路
+    ├── main_window.py         # 聊天主窗口：业务总调度、界面交互入口
+    └── widgets/               # GUI 组件库
+        ├── __init__.py
+        ├── login_dialog.py      # 登录对话框：服务器地址+昵称输入、连接校验
+        ├── msg_bubble.py        # 聊天气泡控件：己方/对方/系统三种样式、自适应宽度
+        ├── minesweeper/         # 扫雷游戏组件集
+        │   ├── __init__.py
+        │   ├── invite_dialog.py  # 游戏邀请弹窗：玩家列表、倒计时、接受/拒绝
+        │   ├── game_window.py    # 游戏主窗口：16×16 棋盘、玩家列表、回合控制
+        │   └── result_dialog.py  # 结算弹窗：排名展示、重赛投票
+        ├── file_transfer/       # 文件传输组件集
+        │   ├── __init__.py
+        │   ├── send_progress.py    # 发送进度弹窗
+        │   ├── receive_dialog.py   # 接收确认对话框：路径选择、重名自动处理
+        │   └── receive_progress.py # 接收进度弹窗
+        └── video_chat/          # 音视频通话组件集
+            ├── __init__.py
+            ├── invite_dialog.py  # 通话邀请弹窗：玩家状态、倒计时
+            └── chat_window.py    # 通话主窗口：本地预览、远程多画面、双静音控制
+```
+
+### 架构说明
+1.  **通信层**：TCP 承载可靠信令与文本、文件数据，UDP 承载低延迟音视频媒体流；自定义 8 字节包头的应用层协议，实现各业务类型解耦。
+2.  **服务端**：采用模块化设计，连接层与业务层分离，聊天、文件、游戏、通话四大业务独立封装，通过回调函数接入连接分发器，新增业务无需修改核心连接逻辑。
+3.  **客户端**：采用 Qt 信号槽机制实现 UI 线程与业务线程解耦；网络、音视频全部运行在独立子线程，通过信号驱动界面更新，避免阻塞 GUI 主线程。
+4.  **入口设计**：根目录 `run_*.py` 为打包专用入口，处理路径初始化后调用包内主逻辑；源码运行使用 `python -m server.main` / `python -m client.main` 即可。
+
 ## 运行说明
 ### 打包前运行
 1.  多台电脑接入**同一个局域网**，关闭 Windows 防火墙或放行 8080 端口 TCP、8081 端口 UDP 入站规则。
@@ -95,7 +143,6 @@ python -m client.main
 ```powershell
 pyinstaller -F -n 局域网聊天室服务端 run_server.py
 ```
-
 客户端打包命令：
 ```powershell
 pyinstaller -F -n 局域网聊天室服务端 run_client.py
